@@ -1,0 +1,428 @@
+{
+  "ranking_system": "QS",
+  "edition": 2026,
+  "source_file": "qs_2026_by_subjects.xlsx",
+  "subject_count": 60,
+  "subjects": [
+    {
+      "subject": "Accounting & Finance",
+      "edition": 2026,
+      "worksheet": "Accounting & Finance",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 376
+    },
+    {
+      "subject": "Agriculture & Forestry",
+      "edition": 2026,
+      "worksheet": "Agriculture & Forestry",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 475
+    },
+    {
+      "subject": "Anatomy & Physiology",
+      "edition": 2026,
+      "worksheet": "Anatomy & Physiology",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 202
+    },
+    {
+      "subject": "Anthropology",
+      "edition": 2026,
+      "worksheet": "Anthropology",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 203
+    },
+    {
+      "subject": "Archaeology",
+      "edition": 2026,
+      "worksheet": "Archaeology",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 260
+    },
+    {
+      "subject": "Architecture / Built Environment",
+      "edition": 2026,
+      "worksheet": "Architecture _ Built Environmen",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 262
+    },
+    {
+      "subject": "Art & Design",
+      "edition": 2026,
+      "worksheet": "Art & Design",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 303
+    },
+    {
+      "subject": "Arts & Humanities",
+      "edition": 2026,
+      "worksheet": "Arts & Humanities",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 553
+    },
+    {
+      "subject": "Biological Sciences",
+      "edition": 2026,
+      "worksheet": "Biological Sciences",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 704
+    },
+    {
+      "subject": "Business & Management Studies",
+      "edition": 2026,
+      "worksheet": "Business & Management Studies",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 650
+    },
+    {
+      "subject": "Chemistry",
+      "edition": 2026,
+      "worksheet": "Chemistry",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 702
+    },
+    {
+      "subject": "Classics & Ancient History",
+      "edition": 2026,
+      "worksheet": "Classics & Ancient History",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 150
+    },
+    {
+      "subject": "Communication & Media Studies",
+      "edition": 2026,
+      "worksheet": "Communication & Media Studies",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 277
+    },
+    {
+      "subject": "Computer Science & Information Systems",
+      "edition": 2026,
+      "worksheet": "Computer Science & Information ",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 850
+    },
+    {
+      "subject": "Data Science and Artificial Intelligence",
+      "edition": 2026,
+      "worksheet": "Data Science and Artificial Int",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 201
+    },
+    {
+      "subject": "Dentistry",
+      "edition": 2026,
+      "worksheet": "Dentistry",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 150
+    },
+    {
+      "subject": "Development Studies",
+      "edition": 2026,
+      "worksheet": "Development Studies",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 150
+    },
+    {
+      "subject": "Earth & Marine Sciences",
+      "edition": 2026,
+      "worksheet": "Earth & Marine Sciences",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 276
+    },
+    {
+      "subject": "Economics & Econometrics",
+      "edition": 2026,
+      "worksheet": "Economics & Econometrics",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 699
+    },
+    {
+      "subject": "Education",
+      "edition": 2026,
+      "worksheet": "Education",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 452
+    },
+    {
+      "subject": "Engineering & Technology",
+      "edition": 2026,
+      "worksheet": "Engineering & Technology",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 556
+    },
+    {
+      "subject": "Engineering - Chemical",
+      "edition": 2026,
+      "worksheet": "Engineering - Chemical",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 449
+    },
+    {
+      "subject": "Engineering - Civil & Structural",
+      "edition": 2026,
+      "worksheet": "Engineering - Civil & Structura",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 277
+    },
+    {
+      "subject": "Engineering - Electrical & Electronic",
+      "edition": 2026,
+      "worksheet": "Engineering - Electrical & Elec",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 549
+    },
+    {
+      "subject": "Engineering - Mechanical, Aeronautical & Manufacturing",
+      "edition": 2026,
+      "worksheet": "Engineering - Mechanical, Aeron",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 575
+    },
+    {
+      "subject": "Engineering - Mineral & Mining",
+      "edition": 2026,
+      "worksheet": "Engineering - Mineral & Mining",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 101
+    },
+    {
+      "subject": "English Language & Literature",
+      "edition": 2026,
+      "worksheet": "English Language & Literature",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 352
+    },
+    {
+      "subject": "Environmental Sciences",
+      "edition": 2026,
+      "worksheet": "Environmental Sciences",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 553
+    },
+    {
+      "subject": "Geography",
+      "edition": 2026,
+      "worksheet": "Geography",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 251
+    },
+    {
+      "subject": "Geology",
+      "edition": 2026,
+      "worksheet": "Geology",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 250
+    },
+    {
+      "subject": "Geophysics",
+      "edition": 2026,
+      "worksheet": "Geophysics",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 249
+    },
+    {
+      "subject": "History",
+      "edition": 2026,
+      "worksheet": "History_Subject",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 249
+    },
+    {
+      "subject": "History of Art",
+      "edition": 2026,
+      "worksheet": "History of Art",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 50
+    },
+    {
+      "subject": "Hospitality & Leisure Management",
+      "edition": 2026,
+      "worksheet": "Hospitality & Leisure Managemen",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 174
+    },
+    {
+      "subject": "Law",
+      "edition": 2026,
+      "worksheet": "Law",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 403
+    },
+    {
+      "subject": "Library & Information Management",
+      "edition": 2026,
+      "worksheet": "Library & Information Managemen",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 100
+    },
+    {
+      "subject": "Life Sciences & Medicine",
+      "edition": 2026,
+      "worksheet": "Life Sciences & Medicine",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 550
+    },
+    {
+      "subject": "Linguistics",
+      "edition": 2026,
+      "worksheet": "Linguistics",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 350
+    },
+    {
+      "subject": "Marketing",
+      "edition": 2026,
+      "worksheet": "Marketing",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 100
+    },
+    {
+      "subject": "Materials Science",
+      "edition": 2026,
+      "worksheet": "Materials Science",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 554
+    },
+    {
+      "subject": "Mathematics",
+      "edition": 2026,
+      "worksheet": "Mathematics",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 603
+    },
+    {
+      "subject": "Medicine",
+      "edition": 2026,
+      "worksheet": "Medicine",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 847
+    },
+    {
+      "subject": "Modern Languages",
+      "edition": 2026,
+      "worksheet": "Modern Languages",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 352
+    },
+    {
+      "subject": "Music",
+      "edition": 2026,
+      "worksheet": "Music",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 50
+    },
+    {
+      "subject": "Natural Sciences",
+      "edition": 2026,
+      "worksheet": "Natural Sciences",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 554
+    },
+    {
+      "subject": "Nursing",
+      "edition": 2026,
+      "worksheet": "Nursing",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 225
+    },
+    {
+      "subject": "Performing Arts",
+      "edition": 2026,
+      "worksheet": "Performing Arts",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 150
+    },
+    {
+      "subject": "Petroleum Engineering",
+      "edition": 2026,
+      "worksheet": "Petroleum Engineering",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 174
+    },
+    {
+      "subject": "Pharmacy & Pharmacology",
+      "edition": 2026,
+      "worksheet": "Pharmacy & Pharmacology",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 402
+    },
+    {
+      "subject": "Philosophy",
+      "edition": 2026,
+      "worksheet": "Philosophy",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 225
+    },
+    {
+      "subject": "Physics & Astronomy",
+      "edition": 2026,
+      "worksheet": "Physics & Astronomy",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 676
+    },
+    {
+      "subject": "Politics & International Studies",
+      "edition": 2026,
+      "worksheet": "Politics & International Studie",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 400
+    },
+    {
+      "subject": "Psychology",
+      "edition": 2026,
+      "worksheet": "Psychology",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 356
+    },
+    {
+      "subject": "Social Policy & Administration",
+      "edition": 2026,
+      "worksheet": "Social Policy & Administration",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 149
+    },
+    {
+      "subject": "Social Sciences & Management",
+      "edition": 2026,
+      "worksheet": "Social Sciences & Management",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 550
+    },
+    {
+      "subject": "Sociology",
+      "edition": 2026,
+      "worksheet": "Sociology",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 374
+    },
+    {
+      "subject": "Sports-related Subjects",
+      "edition": 2026,
+      "worksheet": "Sports-related Subjects",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 149
+    },
+    {
+      "subject": "Statistics & Operational Research",
+      "edition": 2026,
+      "worksheet": "Statistics & Operational Resear",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 275
+    },
+    {
+      "subject": "Theology, Divinity & Religious Studies",
+      "edition": 2026,
+      "worksheet": "Theology, Divinity & Religious ",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 150
+    },
+    {
+      "subject": "Veterinary Science",
+      "edition": 2026,
+      "worksheet": "Veterinary Science",
+      "source_file": "qs_2026_by_subjects.xlsx",
+      "record_count": 100
+    }
+  ]
+}
