@@ -35,6 +35,8 @@ type CandidateProgram = {
   ranking_edition: number;
   ranking_source_url: string;
   official_program_url: string;
+  degree_type: string;
+  relevance_reason: string;
 };
 type TargetProgram = {
   university: string;
@@ -42,6 +44,18 @@ type TargetProgram = {
   official_program_url: string;
   official_domain: string;
   confirmation_status: "confirmed";
+  intended_entry_year: number;
+  intended_entry_term: "fall" | "spring" | "summer" | "winter";
+};
+type ApplicationDeadline = { label: string; type: string; date: string; source_url: string };
+type ApplicationTimeline = {
+  admission_cycle: string;
+  application_open_date: string | null;
+  application_open_source_url: string | null;
+  application_deadlines: ApplicationDeadline[];
+  rolling_admission: boolean | null;
+  rolling_admission_source_url: string | null;
+  status: "complete" | "partial" | "not_found";
 };
 type RequirementCategory = "academic" | "course" | "language" | "standardized_test" | "experience" | "materials" | "other";
 type RequirementCoverage = "official_verified" | "model_memory_unverified" | "user_supplied" | "not_found";
@@ -97,6 +111,7 @@ type CandidateUniversity = {
   overall_ranking: OverallRanking | null;
   overall_ranking_status: "ranked" | "not_ranked" | "unknown";
   subject_ranking: SubjectRanking | null;
+  school_official_url: string | null;
 };
 type SubjectMappingResponse = { target_major: string; candidates: string[] };
 
@@ -112,8 +127,8 @@ const REQUIREMENT_CATEGORIES: { id: RequirementCategory; label: string }[] = [
   { id: "other", label: "其他要求" },
 ];
 const COVERAGE_LABELS: Record<RequirementCoverage, string> = {
-  official_verified: "官网已确认",
-  model_memory_unverified: "AI参考信息 · 当前官网尚未确认",
+  official_verified: "AI 检索自官网",
+  model_memory_unverified: "AI 参考 · 当前未确认官方来源",
   user_supplied: "用户补充",
   not_found: "暂未获得明确要求",
 };
@@ -137,8 +152,10 @@ const EMPTY_PROFILE: UserProfile = {
   standardized_test: { GRE: null, GMAT: null },
 };
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+const DEFAULT_ENTRY_YEAR = new Date().getUTCFullYear() + 1;
 const TARGET_CONFIRMATION_TIMEOUT_MS = 35_000;
 const REQUIREMENTS_RETRIEVAL_TIMEOUT_MS = 130_000;
+const TIMELINE_RETRIEVAL_TIMEOUT_MS = 130_000;
 const OVERALL_RANKING_EXPLANATION = "QS 综合排名与学科排名的覆盖范围不同。部分专业型院校可能未进入综合榜，但仍会出现在对应学科排名中。建议结合学科排名判断该校在目标领域的实力。";
 
 function OverallRankingValue({ university }: { university: CandidateUniversity }) {
@@ -171,6 +188,8 @@ export default function Home() {
   const [subjectMappingError, setSubjectMappingError] = useState("");
   const [rankingMin, setRankingMin] = useState("1");
   const [rankingMax, setRankingMax] = useState("100");
+  const [intendedEntryYear, setIntendedEntryYear] = useState(String(DEFAULT_ENTRY_YEAR));
+  const [intendedEntryTerm, setIntendedEntryTerm] = useState<"fall" | "spring" | "summer" | "winter">("fall");
   const [additionalPreferences, setAdditionalPreferences] = useState("");
   const [candidateUniversities, setCandidateUniversities] = useState<CandidateUniversity[]>([]);
   const [programsByUniversity, setProgramsByUniversity] = useState<Record<string, CandidateProgram[]>>({});
@@ -188,6 +207,9 @@ export default function Home() {
   const [requirementsReview, setRequirementsReview] = useState<TargetProgramRequirementsReview | null>(null);
   const [isLoadingRequirements, setIsLoadingRequirements] = useState(false);
   const [requirementsError, setRequirementsError] = useState("");
+  const [applicationTimeline, setApplicationTimeline] = useState<ApplicationTimeline | null>(null);
+  const [isLoadingTimeline, setIsLoadingTimeline] = useState(false);
+  const [timelineError, setTimelineError] = useState("");
   const [supplementCategory, setSupplementCategory] = useState<RequirementCategory | null>(null);
   const [supplementRequirement, setSupplementRequirement] = useState("");
   const [supplementSourceUrl, setSupplementSourceUrl] = useState("");
@@ -268,6 +290,8 @@ export default function Home() {
     setTargetStep("requirements");
     setRequirementsReview(null);
     setRequirementsError("");
+    setApplicationTimeline(null);
+    setTimelineError("");
     setSupplementCategory(null);
     setGapPlan(null);
     setGapQuestionIndex(0);
@@ -276,6 +300,7 @@ export default function Home() {
     setGapAnalysis(null);
     setGapError("");
     void retrieveRequirements(targetProgram);
+    void retrieveTimeline(targetProgram);
   }
 
   async function retrieveRequirements(targetProgram: TargetProgram) {
@@ -308,6 +333,42 @@ export default function Home() {
     } finally {
       window.clearTimeout(timeoutId);
       setIsLoadingRequirements(false);
+    }
+  }
+
+  async function retrieveTimeline(targetProgram: TargetProgram) {
+    if (isLoadingTimeline) return;
+    setIsLoadingTimeline(true);
+    setTimelineError("");
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), TIMELINE_RETRIEVAL_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${API_BASE_URL}/target-programs/timeline`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          university: targetProgram.university,
+          program_name: targetProgram.program,
+          official_program_url: targetProgram.official_program_url || null,
+          intended_entry_year: targetProgram.intended_entry_year,
+          intended_entry_term: targetProgram.intended_entry_term,
+        }),
+        signal: controller.signal,
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail ?? "暂时无法获取申请时间线。");
+      setApplicationTimeline(data as ApplicationTimeline);
+    } catch (error) {
+      setTimelineError(
+        error instanceof DOMException && error.name === "AbortError"
+          ? "申请时间线获取超时，请重试。"
+          : error instanceof Error
+            ? error.message
+            : "暂时无法获取申请时间线。",
+      );
+    } finally {
+      window.clearTimeout(timeoutId);
+      setIsLoadingTimeline(false);
     }
   }
 
@@ -454,10 +515,12 @@ export default function Home() {
           university: inputTarget.university.trim(),
           program: inputTarget.program?.trim() ?? "",
           official_program_url: inputTarget.official_program_url?.trim() ?? "",
+          intended_entry_year: Number(intendedEntryYear) || DEFAULT_ENTRY_YEAR,
+          intended_entry_term: intendedEntryTerm,
         }),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.detail ?? "暂时无法从学校官网确认该项目。");
+      if (!response.ok) throw new Error(data.detail ?? "AI Web Search 暂时无法识别该项目。");
       return data as TargetProgram;
     } catch (error) {
       setConfirmationError(
@@ -465,7 +528,7 @@ export default function Home() {
           ? "项目确认超时，请重试。"
           : error instanceof Error
             ? error.message
-            : "暂时无法从学校官网确认该项目。请检查项目名称，或粘贴官方项目链接后重试。",
+            : "AI Web Search 暂时无法识别该项目，请检查名称或链接后重试。",
       );
       return null;
     } finally {
@@ -619,6 +682,7 @@ export default function Home() {
                   {subjectMappingError && <p className={styles.subjectError}>{subjectMappingError}</p>}
                 </div>}
                 <div className={styles.filterRow}><label><span>QS 排名从</span><input type="number" min="1" value={rankingMin} onChange={(event) => setRankingMin(event.target.value)} placeholder="1" /></label><label><span>QS 排名到</span><input type="number" min="1" value={rankingMax} onChange={(event) => setRankingMax(event.target.value)} placeholder="100" /></label></div>
+                <div className={styles.filterRow}><label><span>目标入学年份</span><input type="number" min={DEFAULT_ENTRY_YEAR - 1} max="2100" value={intendedEntryYear} onChange={(event) => setIntendedEntryYear(event.target.value)} /></label><label><span>目标入学学期</span><select value={intendedEntryTerm} onChange={(event) => setIntendedEntryTerm(event.target.value as typeof intendedEntryTerm)}><option value="fall">Fall / 秋季</option><option value="spring">Spring / 春季</option><option value="summer">Summer / 夏季</option><option value="winter">Winter / 冬季</option></select></label></div>
                 <label><span>其他偏好 <small>可选</small></span><textarea rows={4} value={additionalPreferences} onChange={(event) => setAdditionalPreferences(event.target.value)} placeholder="例如：偏好大城市、希望有实习机会、预算范围……" /></label>
                 <p className={styles.liveFilterHint}>{isDiscovering ? "正在更新院校列表…" : "院校列表会随筛选条件实时更新"}</p>
               </section>
@@ -636,12 +700,12 @@ export default function Home() {
                   const isLoading = loadingUniversity === key;
                   return <article className={styles.universityCard} key={key}>
                     <div className={styles.universityTop}><div className={styles.universityMonogram}>{candidateUniversity.university.slice(0, 1)}</div><div className={styles.universityName}><h3>{candidateUniversity.university}</h3><p><span>{candidateUniversity.country}</span> · {candidateUniversity.ranking_basis === "subject" ? candidateUniversity.ranking_subject : "世界大学综合排名"}</p></div>{candidateUniversity.ranking_basis === "subject" && candidateUniversity.subject_ranking ? <div className={`${styles.rankingBadge} ${styles.dualRankingBadge}`}><div><small>QS 综合 {candidateUniversity.overall_ranking?.edition ?? 2027}</small><strong><OverallRankingValue university={candidateUniversity} /></strong></div><div><small>QS {candidateUniversity.subject_ranking.subject} · {candidateUniversity.subject_ranking.edition}</small><strong>#{candidateUniversity.subject_ranking.rank_display}</strong></div></div> : <div className={styles.rankingBadge}><small>QS 综合 {candidateUniversity.overall_ranking?.edition ?? candidateUniversity.ranking_edition}</small><strong>#{candidateUniversity.overall_ranking?.rank_display ?? candidateUniversity.rank_display}</strong></div>}</div>
-                    <div className={styles.universityFoot}><span>本地 QS 官方数据</span><button type="button" disabled={Boolean(loadingUniversity) || !target.target_major.trim()} onClick={() => void discoverPrograms(target, candidateUniversity)}>{!target.target_major.trim() ? "填写目标专业后查看项目" : isLoading ? "正在检索项目…" : programs ? "收起相关项目 ↑" : "查看相关项目 →"}</button></div>
+                    <div className={styles.universityFoot}><span>本地 QS 数据 · {candidateUniversity.school_official_url ? <a href={candidateUniversity.school_official_url} target="_blank" rel="noopener noreferrer">学校官网 ↗</a> : "官网暂未确认"}</span><button type="button" disabled={Boolean(loadingUniversity) || !target.target_major.trim()} onClick={() => void discoverPrograms(target, candidateUniversity)}>{!target.target_major.trim() ? "填写目标专业后查看项目" : isLoading ? "正在检索项目…" : programs ? "收起相关项目 ↑" : "查看相关项目 →"}</button></div>
                     {programErrors[key] && <div className={`${styles.discoveryNotice} ${styles.discoveryError}`}>{programErrors[key]}</div>}
                     {programs && <div className={styles.expandedPrograms}>
-                      {programs.length === 0 ? <p className={styles.noPrograms}>未能从该校官方域名确认与目标专业高度相关的硕士项目。</p> : programs.map((candidate) => {
+                      {programs.length === 0 ? <p className={styles.noPrograms}>AI Web Search 暂未找到与目标专业高度相关的硕士项目。</p> : programs.map((candidate) => {
                         const confirming = isConfirmingTarget && confirmationUniversity === key;
-                        return <div className={styles.programRow} key={candidate.official_program_url}><div><span>硕士项目</span><h4>{candidate.program}</h4><a href={candidate.official_program_url} target="_blank" rel="noopener noreferrer">查看项目官网 ↗</a></div><button type="button" disabled={isConfirmingTarget} onClick={() => void confirmTargetProgram({ university: candidate.university, program: candidate.program, official_program_url: candidate.official_program_url })}>{confirming ? "正在确认…" : "设为目标项目"}</button></div>;
+                        return <div className={styles.programRow} key={candidate.official_program_url}><div><span>{candidate.degree_type || "硕士项目"}</span><h4>{candidate.program}</h4>{candidate.relevance_reason && <p>{candidate.relevance_reason}</p>}<a href={candidate.official_program_url} target="_blank" rel="noopener noreferrer">查看项目官网 ↗</a></div><button type="button" disabled={isConfirmingTarget} onClick={() => void confirmTargetProgram({ university: candidate.university, program: candidate.program, official_program_url: candidate.official_program_url })}>{confirming ? "正在处理…" : "设为目标项目"}</button></div>;
                       })}
                       {confirmationError && confirmationUniversity === key && <div className={styles.confirmationError}>{confirmationError}</div>}
                       <div className={styles.manualProgramEntry}>
@@ -649,10 +713,10 @@ export default function Home() {
                           <div className={styles.manualEntryHeading}><strong>手动添加项目</strong><button type="button" onClick={() => { setManualUniversity(null); setManualProgramUrl(""); setManualVerifiedProgram(null); setConfirmationError(""); }}>取消</button></div>
                           <label><span>学校</span><input value={key} readOnly /></label>
                           <label><span>官方项目链接 *</span><input type="url" value={manualProgramUrl} onChange={(event) => { setManualProgramUrl(event.target.value); setManualVerifiedProgram(null); setConfirmationError(""); }} placeholder="https://www.ox.ac.uk/…" required /></label>
-                          <p className={styles.manualEntryHint}>请粘贴学校官网中的具体项目页面链接，我们会自动识别并确认项目。</p>
-                          <button className={styles.primaryAction} type="submit" disabled={isConfirmingTarget || !manualProgramUrl.trim()}>{isConfirmingTarget && confirmationUniversity === key ? "正在验证…" : "验证项目链接"}</button>
+                          <p className={styles.manualEntryHint}>请粘贴具体项目页面链接，AI Web Search 会识别项目名称与页面。</p>
+                          <button className={styles.primaryAction} type="submit" disabled={isConfirmingTarget || !manualProgramUrl.trim()}>{isConfirmingTarget && confirmationUniversity === key ? "正在识别…" : "识别项目链接"}</button>
                           {manualVerifiedProgram?.university === key && <div className={`${styles.programRow} ${styles.manualVerifiedCard}`}>
-                            <div><span>{manualVerifiedProgram.university}</span><h4>{manualVerifiedProgram.program}</h4><p className={styles.verifiedStatus}>✓ 已从学校官网确认</p><a href={manualVerifiedProgram.official_program_url} target="_blank" rel="noopener noreferrer">查看官方项目页面 ↗</a></div>
+                            <div><span>{manualVerifiedProgram.university}</span><h4>{manualVerifiedProgram.program}</h4><p className={styles.verifiedStatus}>✓ AI Web Search 已识别</p><a href={manualVerifiedProgram.official_program_url} target="_blank" rel="noopener noreferrer">查看项目页面 ↗</a></div>
                             <button type="button" onClick={() => setActiveTarget(manualVerifiedProgram)}>设为目标项目</button>
                           </div>}
                         </form> : <div className={styles.manualEntryPrompt}><span>没找到你想申请的项目？</span><button type="button" onClick={() => { setManualUniversity(key); setManualProgramUrl(""); setManualVerifiedProgram(null); setConfirmationError(""); }}>手动添加项目</button></div>}
@@ -665,9 +729,16 @@ export default function Home() {
           </>}
 
           {targetStep === "requirements" && activeTargetProgram && <div className={styles.requirementsReview}>
-            <div className={styles.requirementsHeading}><div><p className={styles.eyebrow}>REQUIREMENTS REVIEW</p><h1>目标项目申请要求</h1><p>官网证据与 AI 未核验参考会分开展示；暂未获得信息不代表学校没有要求。</p></div><a href={activeTargetProgram.official_program_url} target="_blank" rel="noopener noreferrer">查看项目官网 ↗</a></div>
-            <div className={styles.activeTargetCard}><span>已确认目标项目</span><strong>{activeTargetProgram.university}</strong><h2>{activeTargetProgram.program}</h2></div>
-            {isLoadingRequirements && <div className={styles.requirementsLoading}><i /><strong>正在从学校官网分析申请要求…</strong><span>将按 7 类整理官方证据，请稍候。</span></div>}
+            <div className={styles.requirementsHeading}><div><p className={styles.eyebrow}>REQUIREMENTS REVIEW</p><h1>目标项目申请要求</h1><p>AI 根据公开网页整理，仅供参考；最终申请要求以院校最新官方信息为准。</p></div><a href={activeTargetProgram.official_program_url} target="_blank" rel="noopener noreferrer">查看项目官网 ↗</a></div>
+            <div className={styles.activeTargetCard}><span>已选择目标项目</span><strong>{activeTargetProgram.university}</strong><h2>{activeTargetProgram.program}</h2></div>
+            {isLoadingTimeline && <div className={styles.timelineCard}><div className={styles.timelineHeading}><div><span>APPLICATION TIMELINE</span><h2>正在检索官方申请时间…</h2></div></div></div>}
+            {!isLoadingTimeline && timelineError && <div className={`${styles.discoveryNotice} ${styles.discoveryError}`}><p>{timelineError}</p><button type="button" onClick={() => void retrieveTimeline(activeTargetProgram)}>重新获取时间线</button></div>}
+            {!isLoadingTimeline && applicationTimeline && <article className={styles.timelineCard}>
+              <div className={styles.timelineHeading}><div><span>APPLICATION TIMELINE</span><h2>申请时间线</h2></div><strong className={applicationTimeline.status === "complete" ? styles.timelineComplete : applicationTimeline.status === "partial" ? styles.timelinePartial : styles.timelineMissing}>{applicationTimeline.status === "complete" ? "信息完整" : applicationTimeline.status === "partial" ? "部分信息" : "暂未找到"}</strong></div>
+              <div className={styles.timelineMeta}><div><span>Admission Cycle</span><strong>{applicationTimeline.admission_cycle}</strong></div><div><span>Open Date</span><strong>{applicationTimeline.application_open_date ?? "暂未找到"}</strong>{applicationTimeline.application_open_source_url && <a href={applicationTimeline.application_open_source_url} target="_blank" rel="noopener noreferrer">查看官网来源 ↗</a>}</div><div><span>Rolling Admission</span><strong>{applicationTimeline.rolling_admission === true ? "是" : applicationTimeline.rolling_admission === false ? "否" : "官网未明确"}</strong>{applicationTimeline.rolling_admission_source_url && <a href={applicationTimeline.rolling_admission_source_url} target="_blank" rel="noopener noreferrer">查看官网来源 ↗</a>}</div></div>
+              {applicationTimeline.application_deadlines.length > 0 ? <div className={styles.timelineDeadlines}><h3>Application Deadlines</h3>{applicationTimeline.application_deadlines.map((deadline, index) => <div key={`${deadline.label}-${deadline.date}-${index}`}><div><span>{deadline.type}</span><strong>{deadline.label}</strong></div><time>{deadline.date}</time><a href={deadline.source_url} target="_blank" rel="noopener noreferrer">查看官网来源 ↗</a></div>)}</div> : <p className={styles.timelineEmpty}>当前官方信息中暂未找到该入学周期的申请截止日期。</p>}
+            </article>}
+            {isLoadingRequirements && <div className={styles.requirementsLoading}><i /><strong>AI 正在搜索并整理申请要求…</strong><span>将按 7 类返回 Requirements Snapshot，请稍候。</span></div>}
             {!isLoadingRequirements && requirementsError && <div className={`${styles.discoveryNotice} ${styles.discoveryError}`}><p>{requirementsError}</p><button type="button" onClick={() => void retrieveRequirements(activeTargetProgram)}>重新分析</button></div>}
             {!isLoadingRequirements && requirementsReview && <>
               <div className={styles.requirementsGrid}>{REQUIREMENT_CATEGORIES.map(({ id, label }) => {
@@ -681,13 +752,13 @@ export default function Home() {
                       : styles.coverageMissing;
                 return <article className={styles.requirementCard} key={id}>
                   <div className={styles.requirementCardHeading}><h2>{label}</h2><span className={statusClass}>{COVERAGE_LABELS[category.coverage]}</span></div>
-                  {category.coverage === "model_memory_unverified" && <p className={styles.memoryRequirementNote}>以下内容是 AI 参考信息，当前官网尚未确认；它会参与匹配分析，请结合官网继续核对。</p>}
-                  {category.requirements.length > 0 ? <div className={styles.requirementItems}>{category.requirements.map((requirement, index) => <div key={`${requirement.requirement}-${index}`}><p>{requirement.requirement}</p>{requirement.requirement_zh && <p className={styles.requirementTranslation}>{requirement.requirement_zh}</p>}<div><span>{IMPORTANCE_LABELS[requirement.importance]}</span><span>{SOURCE_LEVEL_LABELS[requirement.source_level]}</span><span>{requirement.source_type === "user_supplied" ? "用户提供" : requirement.source_type === "model_memory" ? "AI参考信息 · 当前官网尚未确认" : "官网检索"}</span></div>{requirement.source_url && <a href={requirement.source_url} target="_blank" rel="noopener noreferrer">查看官方来源 ↗</a>}</div>)}</div> : <p className={styles.missingRequirement}>当前官网检索及 AI 参考信息中暂未获得明确要求，后续 Gap Analysis 将按“信息不足”处理。</p>}
+                  {category.coverage === "model_memory_unverified" && <p className={styles.memoryRequirementNote}>以下内容是 AI 参考，当前未确认官方来源；它会参与匹配分析，请结合院校最新信息继续核对。</p>}
+                  {category.requirements.length > 0 ? <div className={styles.requirementItems}>{category.requirements.map((requirement, index) => <div key={`${requirement.requirement}-${index}`}><p>{requirement.requirement}</p>{requirement.requirement_zh && <p className={styles.requirementTranslation}>{requirement.requirement_zh}</p>}<div><span>{IMPORTANCE_LABELS[requirement.importance]}</span><span>{SOURCE_LEVEL_LABELS[requirement.source_level]}</span><span>{requirement.source_type === "user_supplied" ? "用户提供" : requirement.verification_status === "model_memory_unverified" ? "AI 参考 · 当前未确认官方来源" : "AI 检索自官网"}</span></div>{requirement.source_url && <a href={requirement.source_url} target="_blank" rel="noopener noreferrer">{requirement.verification_status === "model_memory_unverified" ? "查看参考页面 ↗" : "查看官网来源 ↗"}</a>}</div>)}</div> : <p className={styles.missingRequirement}>DeepSeek 本次既未获得可用官网信息，也无法提供合理 AI 参考；后续 Gap Analysis 将按“信息不足”处理。</p>}
                   {(category.coverage === "not_found" || category.coverage === "model_memory_unverified") && supplementCategory !== id && <button type="button" className={styles.supplementButton} onClick={() => { setSupplementCategory(id); setSupplementRequirement(""); setSupplementSourceUrl(""); }}>补充信息</button>}
                   {supplementCategory === id && <form className={styles.supplementForm} onSubmit={saveRequirementSupplement}><label><span>官网要求原文 *</span><textarea rows={4} value={supplementRequirement} onChange={(event) => setSupplementRequirement(event.target.value)} required /></label><label><span>来源页面 URL <small>推荐</small></span><input type="url" value={supplementSourceUrl} onChange={(event) => setSupplementSourceUrl(event.target.value)} placeholder="https://…" /></label><div><button type="button" onClick={() => setSupplementCategory(null)}>取消</button><button type="submit" disabled={!supplementRequirement.trim()}>保存</button></div></form>}
                 </article>;
               })}</div>
-              <div className={styles.requirementsActions}><p>只会根据官网已确认或用户补充的要求询问必要信息；AI 未核验参考和暂未找到项不会强制追问。</p><button type="button" className={styles.primaryAction} onClick={() => void startGapInterview()} disabled={isPlanningGap}>{isPlanningGap ? "正在规划匹配访谈…" : "开始匹配分析"} <span>→</span></button></div>
+              <div className={styles.requirementsActions}><p>官网来源、AI 参考和用户补充都可参与匹配；AI 参考会始终保留来源状态，暂未找到项按信息不足处理。</p><button type="button" className={styles.primaryAction} onClick={() => void startGapInterview()} disabled={isPlanningGap}>{isPlanningGap ? "正在规划匹配访谈…" : "开始匹配分析"} <span>→</span></button></div>
               {gapError && <div className={`${styles.discoveryNotice} ${styles.discoveryError}`}>{gapError}</div>}
             </>}
           </div>}
@@ -713,7 +784,7 @@ export default function Home() {
           {targetStep === "gap_results" && activeTargetProgram && gapAnalysis && <div className={styles.gapResultsStage}>
             <div className={styles.gapResultsHeading}><div><p className={styles.eyebrow}>GAP TABLE</p><h1>申请匹配结果</h1><p>{activeTargetProgram.university} · {activeTargetProgram.program}</p></div><button type="button" className={styles.backButton} onClick={() => setTargetStep("requirements")}>返回查看申请要求</button></div>
             <div className={styles.gapSummary}>{(["met", "partial", "not_met", "unknown"] as GapStatus[]).map((status) => <div key={status}><span>{status === "met" ? "满足" : status === "partial" ? "部分满足" : status === "not_met" ? "未满足" : "信息不足"}</span><strong>{gapAnalysis.results.filter((item) => item.status === status).length}</strong></div>)}</div>
-            <div className={styles.gapTableWrap}><table className={styles.gapTable}><thead><tr><th>目标要求</th><th>类型</th><th>匹配状态</th><th>用户证据</th><th>差距</th><th>来源</th></tr></thead><tbody>{gapAnalysis.results.map((result) => <tr key={result.requirement_id}><td><strong>{result.requirement}</strong>{result.requirement_zh && <span className={styles.gapRequirementTranslation}>{result.requirement_zh}</span>}<small>{result.reason}</small></td><td>{REQUIREMENT_CATEGORIES.find((item) => item.id === result.category)?.label ?? result.category}</td><td><span className={result.status === "met" ? styles.gapStatusMet : result.status === "partial" ? styles.gapStatusPartial : result.status === "not_met" ? styles.gapStatusNotMet : styles.gapStatusUnknown}>{result.status === "met" ? "满足" : result.status === "partial" ? "部分满足" : result.status === "not_met" ? "未满足" : "信息不足"}</span></td><td>{result.user_evidence}</td><td>{result.gap}</td><td>{result.requirement_verification_status === "user_supplied" ? "用户补充要求" : result.requirement_verification_status === "model_memory_unverified" ? "AI参考要求 · 当前官网尚未确认" : result.source_url ? <a href={result.source_url} target="_blank" rel="noopener noreferrer">官网来源 ↗</a> : "官网已确认"}</td></tr>)}</tbody></table></div>
+            <div className={styles.gapTableWrap}><table className={styles.gapTable}><thead><tr><th>目标要求</th><th>类型</th><th>匹配状态</th><th>用户证据</th><th>差距</th><th>来源</th></tr></thead><tbody>{gapAnalysis.results.map((result) => <tr key={result.requirement_id}><td><strong>{result.requirement}</strong>{result.requirement_zh && <span className={styles.gapRequirementTranslation}>{result.requirement_zh}</span>}<small>{result.reason}</small></td><td>{REQUIREMENT_CATEGORIES.find((item) => item.id === result.category)?.label ?? result.category}</td><td><span className={result.status === "met" ? styles.gapStatusMet : result.status === "partial" ? styles.gapStatusPartial : result.status === "not_met" ? styles.gapStatusNotMet : styles.gapStatusUnknown}>{result.status === "met" ? "满足" : result.status === "partial" ? "部分满足" : result.status === "not_met" ? "未满足" : "信息不足"}</span></td><td>{result.user_evidence}</td><td>{result.gap}</td><td>{result.requirement_verification_status === "user_supplied" ? "用户补充要求" : result.requirement_verification_status === "model_memory_unverified" ? "AI 参考 · 当前未确认官方来源" : result.source_url ? <a href={result.source_url} target="_blank" rel="noopener noreferrer">官网来源 ↗</a> : "AI 检索自官网"}</td></tr>)}</tbody></table></div>
             {gapAnalysis.informational_requirements.length > 0 && <div className={styles.informationalRequirements}><strong>以下为信息型要求，不参与匹配判断</strong>{gapAnalysis.informational_requirements.map((item) => <p key={item.requirement_id}>{item.requirement}</p>)}</div>}
           </div>}
         </section>
@@ -726,7 +797,7 @@ export default function Home() {
       <header className={styles.header}><div className={styles.brand}><span className={styles.brandMark}>知</span><span>知途留学</span></div><span className={styles.status}>基础信息 · 约 1 分钟</span></header>
       <div className={styles.workspace}>
         <aside className={styles.sidebar} aria-label="访谈进度">
-          <div><p className={styles.eyebrow}>MINIMAL PROFILE</p><h1>先认识一下你的本科背景</h1><p className={styles.sidebarIntro}>这里只收集本科院校和专业。成绩、课程与经历会在选定项目后，根据官网要求按需询问。</p></div>
+          <div><p className={styles.eyebrow}>MINIMAL PROFILE</p><h1>先认识一下你的本科背景</h1><p className={styles.sidebarIntro}>这里只收集本科院校和专业。成绩、课程与经历会在选定项目后，根据当前 Requirements 按需询问。</p></div>
           <div className={styles.progressBlock}><div className={styles.progressMeta}><span>完成进度</span><strong>{progress}%</strong></div><div className={styles.progressTrack}><span style={{ width: `${progress}%` }} /></div></div>
           <ol className={styles.steps}>{topics.map((topic, index) => {
             const state = index < topicIndex ? "done" : index === topicIndex ? "active" : "";

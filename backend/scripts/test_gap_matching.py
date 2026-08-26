@@ -166,6 +166,115 @@ async def check_ai_reference_interview() -> None:
         application.call_deepseek = original_call
 
 
+async def check_evidence_type_synonym_compatibility() -> None:
+    review = TargetProgramRequirementsReview(
+        target_program=TARGET,
+        checked_at="2026-08-26T00:00:00Z",
+        categories=[
+            RequirementCategoryReview(
+                category="materials",
+                coverage="official_verified",
+                requirements=[
+                    RequirementItem(
+                        category="materials",
+                        requirement="A portfolio is required.",
+                        importance="required",
+                        source_level="program",
+                        source_type="official_retrieval",
+                        verification_status="official_verified",
+                        source_url="https://example.edu/requirements",
+                    )
+                ],
+            ),
+            RequirementCategoryReview(
+                category="language",
+                coverage="official_verified",
+                requirements=[
+                    RequirementItem(
+                        category="language",
+                        requirement="IELTS 7.0 is required.",
+                        importance="required",
+                        source_level="program",
+                        source_type="official_retrieval",
+                        verification_status="official_verified",
+                        source_url="https://example.edu/requirements",
+                    )
+                ],
+            ),
+        ],
+    )
+    planner_output = {
+        "requirements": [
+            {
+                "requirement_id": "materials:0",
+                "matchable": True,
+                "evidence_needs": [
+                    {
+                        "key": "materials.portfolio",
+                        "evidence_type": "material_boolean",
+                        "label": "作品集准备情况",
+                    }
+                ],
+            },
+            {
+                "requirement_id": "language:0",
+                "matchable": True,
+                "evidence_needs": [
+                    {
+                        "key": "ielts",
+                        "evidence_type": "unexpected_model_synonym",
+                        "label": "IELTS 成绩",
+                    }
+                ],
+            },
+        ],
+        "questions": [],
+    }
+    original_call = application.call_deepseek
+    original_warning = application.logger.warning
+    prompts: list[str] = []
+    warnings: list[tuple[object, ...]] = []
+
+    async def fake_call(*args: object, **kwargs: object) -> str:
+        prompts.append(kwargs["messages"][1]["content"])
+        return json.dumps(planner_output, ensure_ascii=False)
+
+    def fake_warning(*args: object, **kwargs: object) -> None:
+        warnings.append(args)
+
+    try:
+        application.call_deepseek = fake_call
+        application.logger.warning = fake_warning
+        plan = await application.build_gap_plan(
+            application.GapPlanRequest(
+                target_program=TARGET,
+                requirements_review=review,
+                user_profile=UserProfile(),
+            )
+        )
+        assert len(plan.requirements) == 2
+        requirements_by_id = {
+            item.requirement_id: item for item in plan.requirements
+        }
+        material_need = requirements_by_id["materials:0"].evidence_needs[0]
+        assert material_need.evidence_type == "material_status"
+        unknown_need = requirements_by_id["language:0"].evidence_needs[0]
+        assert unknown_need.evidence_type == "generic", unknown_need
+        assert any(
+            args[0] == "unknown_gap_evidence_type value=%r fallback=generic"
+            and args[1] == "unexpected_model_synonym"
+            for args in warnings
+        )
+        assert (
+            "education_university、education_major、academic_score、language_score、"
+            "standardized_score、courses、material_status、material_quantity、experience、generic"
+            in prompts[0]
+        )
+    finally:
+        application.call_deepseek = original_call
+        application.logger.warning = original_warning
+
+
 def main() -> None:
     language = planned_requirement(
         "IELTS overall >= 7.0 and each component >= 6.5",
@@ -344,6 +453,7 @@ def main() -> None:
     )
     assert [item.key for item in existing].count("ielts") == 1
     asyncio.run(check_ai_reference_interview())
+    asyncio.run(check_evidence_type_synonym_compatibility())
     print("gap matching deterministic regressions: all checks passed")
 
 

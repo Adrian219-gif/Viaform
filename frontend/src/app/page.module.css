@@ -145,6 +145,26 @@
 .requirementsHeading>div>p:last-child { margin-top:9px; color:var(--muted); font-size:13px; }
 .requirementsHeading>a { padding:10px 14px; border:1px solid #a9c8bb; border-radius:10px; color:var(--green); background:#fff; font-size:12px; font-weight:700; text-decoration:none; }
 .requirementsReview>.activeTargetCard { margin:22px 0; }
+.timelineCard { margin:0 0 22px; padding:22px; border:1px solid #d7e2dc; border-radius:16px; background:#fff; box-shadow:0 9px 28px rgba(28,48,40,.04); }
+.timelineHeading { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+.timelineHeading span { color:var(--green); font-size:9px; font-weight:800; letter-spacing:.12em; }
+.timelineHeading h2 { margin-top:5px; font-family:Georgia,"Noto Serif SC",serif; font-size:21px; font-weight:600; }
+.timelineHeading>strong { padding:5px 9px; border-radius:99px; font-size:10px; }
+.timelineComplete { color:#17674f; background:#e6f3ed; }
+.timelinePartial { color:#72570f; background:#fff3cc; }
+.timelineMissing { color:#7c8782; background:#edf0ee; }
+.timelineMeta { margin-top:18px; display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+.timelineMeta>div { padding:14px; display:grid; gap:6px; border-radius:11px; background:#f5f8f6; }
+.timelineMeta span { color:#77837d; font-size:9px; font-weight:800; letter-spacing:.08em; }
+.timelineMeta strong { color:#2d3b35; font-size:13px; }
+.timelineCard a { color:var(--green); font-size:10px; font-weight:700; text-decoration:none; }
+.timelineDeadlines { margin-top:18px; display:grid; gap:8px; }
+.timelineDeadlines h3 { margin-bottom:3px; font-size:12px; }
+.timelineDeadlines>div { padding:13px 14px; display:grid; grid-template-columns:1fr auto auto; align-items:center; gap:14px; border:1px solid #e1e8e4; border-radius:10px; }
+.timelineDeadlines>div>div { display:grid; gap:3px; }
+.timelineDeadlines span { color:#7a8780; font-size:9px; font-weight:800; text-transform:uppercase; }
+.timelineDeadlines strong,.timelineDeadlines time { color:#34433c; font-size:12px; }
+.timelineEmpty { margin-top:16px; color:#76827c; font-size:12px; }
 .requirementsLoading { min-height:180px; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:9px; border:1px solid #d7e4dd; border-radius:16px; color:#62716a; background:#f8fbf9; }
 .requirementsLoading i { width:28px; height:28px; border:3px solid #d1e1d9; border-top-color:var(--green); border-radius:50%; animation:spin .8s linear infinite; }
 .requirementsLoading strong { color:var(--ink); font-size:14px; }
@@ -262,6 +282,7 @@
 .rankingInfo { color:#7d9189; font-size:13px; line-height:1; cursor:help; outline:none; }
 .rankingInfo:focus { color:var(--green); }
 .universityFoot { min-height:58px; padding:12px 28px; display:flex; align-items:center; justify-content:space-between; gap:18px; border-top:1px solid #edf0ee; background:#fbfcfb; }
+.universityFoot a { color:var(--green); font-weight:700; text-decoration:none; }
 .universityFoot a,.universityFoot>span { color:#86928c; font-size:11px; text-decoration:none; }
 .universityFoot button { border:0; color:var(--green); background:none; font-size:12px; font-weight:800; cursor:pointer; }
 .universityFoot button:disabled { opacity:.5; cursor:default; }
@@ -271,6 +292,7 @@
 .programRow>div { min-width:0; }
 .programRow span { color:#8e9993; font-size:9px; font-weight:800; letter-spacing:.12em; }
 .programRow h4 { margin:5px 0 8px; font-size:15px; line-height:1.5; }
+.programRow p { margin:0 0 8px; color:#748179; font-size:11px; line-height:1.55; }
 .programRow a { color:var(--green); font-size:11px; font-weight:700; text-decoration:none; }
 .programRow button { flex:0 0 auto; padding:9px 12px; border:1px solid var(--green); border-radius:9px; color:var(--green); background:#fff; font-size:11px; font-weight:700; cursor:pointer; }
 .programRow button:disabled { opacity:.55; cursor:default; }
@@ -381,6 +403,8 @@
   .requirementsHeading { align-items:flex-start; flex-direction:column; }
   .requirementsHeading h1 { font-size:32px; }
   .requirementsGrid { grid-template-columns:1fr; }
+  .timelineMeta { grid-template-columns:1fr; }
+  .timelineDeadlines>div { grid-template-columns:1fr; gap:7px; }
   .requirementCard:last-child { grid-column:auto; }
   .requirementsActions { align-items:flex-start; flex-direction:column; }
   .gapProfileGate { align-items:flex-start; flex-direction:column; }
