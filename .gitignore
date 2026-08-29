@@ -1,0 +1,8 @@
+# Local environment files at any repository level.
+.env
+.env.*
+!.env.example
+
+# Python local build artifacts.
+__pycache__/
+*.py[cod]
