@@ -143,7 +143,8 @@
 .requirementsHeading { display:flex; align-items:flex-end; justify-content:space-between; gap:28px; }
 .requirementsHeading h1 { font-family:Georgia,"Noto Serif SC",serif; font-size:38px; font-weight:500; }
 .requirementsHeading>div>p:last-child { margin-top:9px; color:var(--muted); font-size:13px; }
-.requirementsHeading>a { padding:10px 14px; border:1px solid #a9c8bb; border-radius:10px; color:var(--green); background:#fff; font-size:12px; font-weight:700; text-decoration:none; }
+.requirementsHeadingActions { display:flex; align-items:center; gap:10px; }
+.requirementsHeadingActions button,.requirementsHeadingActions a { padding:10px 14px; border:1px solid #a9c8bb; border-radius:10px; color:var(--green); background:#fff; font-size:12px; font-weight:700; text-decoration:none; cursor:pointer; }
 .requirementsReview>.activeTargetCard { margin:22px 0; }
 .timelineCard { margin:0 0 22px; padding:22px; border:1px solid #d7e2dc; border-radius:16px; background:#fff; box-shadow:0 9px 28px rgba(28,48,40,.04); }
 .timelineHeading { display:flex; align-items:center; justify-content:space-between; gap:16px; }
@@ -328,7 +329,7 @@
 .composerFooter button:disabled { opacity:.45; cursor:default; }
 .composerFooter span { color:#9aa29e; font-size:10px; }
 .inlineError { margin:16px 40px; padding:11px 14px; border:1px solid #efd0cb; border-radius:10px; color:#9b4336; background:#fff7f5; font-size:12px; line-height:1.55; }
-.gapInterviewStage,.gapResultsStage { padding:34px 0 70px; }
+.gapInterviewStage,.gapResultsStage,.actionPlanStage { padding:34px 0 70px; }
 .gapInterviewHeading { max-width:780px; margin:0 auto 20px; text-align:center; }
 .gapInterviewHeading h1,.gapResultsHeading h1 { margin:8px 0 10px; font-family:Georgia,"Times New Roman",serif; font-size:38px; font-weight:500; }
 .gapInterviewHeading>p { color:#718078; font-size:13px; line-height:1.75; }
@@ -365,6 +366,38 @@
 .informationalRequirements { margin-top:18px; padding:18px 20px; border:1px solid #dce5e0; border-radius:14px; color:#64716b; background:#f7faf8; }
 .informationalRequirements strong { display:block; margin-bottom:8px; color:#3f5048; font-size:12px; }
 .informationalRequirements p { margin-top:5px; font-size:11px; line-height:1.6; }
+.planningLaunch { margin-top:20px; padding:20px 22px; display:flex; align-items:center; justify-content:space-between; gap:20px; border:1px solid #cfe0d8; border-radius:15px; background:#f5faf7; }
+.planningLaunch strong { color:#29443a; font-size:14px; }
+.planningLaunch p { margin-top:5px; color:#718078; font-size:11px; }
+.actionPlanHeading { margin-bottom:24px; display:flex; align-items:flex-end; justify-content:space-between; gap:24px; }
+.actionPlanHeading h1 { margin:8px 0 10px; font-family:Georgia,"Times New Roman",serif; font-size:38px; font-weight:500; }
+.actionPlanHeading p:last-child { color:#718078; font-size:13px; }
+.actionPlanNotice { margin-bottom:18px; padding:14px 16px; border:1px solid #ead9b5; border-radius:12px; color:#72591f; background:#fff9e9; font-size:12px; line-height:1.65; }
+.actionPlanMeta { margin-bottom:28px; display:grid; grid-template-columns:repeat(3,1fr); overflow:hidden; border:1px solid #dbe4df; border-radius:16px; background:#fff; }
+.actionPlanMeta>div { min-height:88px; padding:17px 20px; display:grid; align-content:center; gap:5px; border-right:1px solid #e4ebe7; }
+.actionPlanMeta>div:last-child { border-right:0; }
+.actionPlanMeta span { color:#75827c; font-size:9px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
+.actionPlanMeta strong { color:#29443a; font-size:14px; }
+.actionPlanMeta small { color:#8a7460; font-size:10px; }
+.unifiedTimeline { display:grid; gap:28px; }
+.actionPeriod { display:grid; grid-template-columns:150px 1fr; gap:24px; }
+.actionPeriodLabel { position:relative; padding-top:16px; display:flex; align-items:flex-start; gap:10px; color:#315347; }
+.actionPeriodLabel::after { content:""; position:absolute; top:34px; bottom:-44px; left:5px; width:1px; background:#d4e1da; }
+.actionPeriod:last-child .actionPeriodLabel::after { display:none; }
+.actionPeriodLabel>span { width:11px; height:11px; margin-top:2px; flex:0 0 auto; border:3px solid #dcebe4; border-radius:50%; background:var(--green); box-sizing:content-box; }
+.actionPeriodLabel strong { font-size:13px; line-height:1.5; }
+.actionPeriodItems { display:grid; gap:11px; }
+.mainAction,.optionalAction { padding:18px 20px; border:1px solid #dbe4df; border-radius:14px; background:#fff; box-shadow:0 8px 24px rgba(34,65,53,.04); }
+.optionalAction { border-style:dashed; background:#fffcf4; }
+.actionCardTop { display:flex; align-items:center; justify-content:space-between; gap:14px; }
+.actionCardTop span { padding:4px 8px; border-radius:99px; color:#17674f; background:#e6f3ed; font-size:9px; font-weight:800; }
+.optionalAction .actionCardTop span { color:#806019; background:#fff0c7; }
+.actionCardTop time { color:#68766f; font-size:10px; font-weight:700; }
+.mainAction h2,.optionalAction h2 { margin-top:10px; color:#273a32; font-size:14px; }
+.mainAction p,.optionalAction p { margin-top:6px; color:#718078; font-size:11px; line-height:1.6; }
+.actionTags { margin-top:12px; display:flex; flex-wrap:wrap; gap:7px; }
+.actionTags span { padding:4px 7px; border-radius:6px; color:#65736c; background:#f0f4f2; font-size:9px; }
+.actionPlanEmpty { padding:28px; border:1px solid #dbe4df; border-radius:16px; color:#607068; background:#fff; text-align:center; font-size:13px; }
 @media (max-width:820px) {
   .page { background:#fff; }
   .header { height:62px; padding:0 18px; }
@@ -408,6 +441,12 @@
   .requirementCard:last-child { grid-column:auto; }
   .requirementsActions { align-items:flex-start; flex-direction:column; }
   .gapProfileGate { align-items:flex-start; flex-direction:column; }
+  .planningLaunch,.actionPlanHeading { align-items:flex-start; flex-direction:column; }
+  .actionPlanMeta { grid-template-columns:1fr; }
+  .actionPlanMeta>div { border-right:0; border-bottom:1px solid #e4ebe7; }
+  .actionPlanMeta>div:last-child { border-bottom:0; }
+  .actionPeriod { grid-template-columns:1fr; gap:8px; }
+  .actionPeriodLabel::after { display:none; }
   .candidateActions { align-items:flex-start; flex-direction:column; }
   .exploreHeading { align-items:flex-start; flex-direction:column; }
   .exploreHeading>p { padding:0; text-align:left; }

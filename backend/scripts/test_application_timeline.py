@@ -106,6 +106,8 @@ async def run() -> None:
         prompt = prompts[0]
         assert "Use only current official university information" in prompt
         assert "Do not use model memory" in prompt
+        assert "future entry cycle has not yet been published" in prompt
+        assert "Never reuse or relabel dates from another entry year" in prompt
         assert "Do not collapse multiple rounds" in prompt
         assert "scholarship" in prompt and "decision release" in prompt
         assert "do not invent a day" in prompt

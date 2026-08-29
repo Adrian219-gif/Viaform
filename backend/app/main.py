@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
 import re
+import socket
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from difflib import SequenceMatcher
+from functools import partial
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Type, TypeVar, get_args
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from dotenv import load_dotenv
@@ -28,6 +32,9 @@ TARGET_PROGRAM_CONFIRMATION_TIMEOUT_SECONDS = 30.0
 REQUIREMENTS_TOTAL_TIMEOUT_SECONDS = 120.0
 TIMELINE_TOTAL_TIMEOUT_SECONDS = 120.0
 WEB_SEARCH_TIMEOUT_SECONDS = 180.0
+OFFICIAL_PROGRAM_PAGE_TIMEOUT_SECONDS = 30.0
+OFFICIAL_PROGRAM_PAGE_MAX_CHARS = 120_000
+OFFICIAL_PROGRAM_PAGE_MAX_REDIRECTS = 3
 SCHOOL_URL_BATCH_SIZE = 12
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
@@ -133,12 +140,6 @@ class ExploreTargetRequest(BaseModel):
     ranking: RankingScope
     ranking_subject: Optional[str] = None
     additional_preferences: str = ""
-    intended_entry_year: int = Field(
-        default_factory=lambda: datetime.now(timezone.utc).year + 1,
-        ge=2026,
-        le=2100,
-    )
-    intended_entry_term: Literal["fall", "spring", "summer", "winter"] = "fall"
 
 
 class QSSubjectMappingRequest(BaseModel):
@@ -212,12 +213,6 @@ class TargetProgramConfirmationRequest(BaseModel):
     university: str = Field(min_length=1)
     program: str = ""
     official_program_url: str = ""
-    intended_entry_year: int = Field(
-        default_factory=lambda: datetime.now(timezone.utc).year + 1,
-        ge=2026,
-        le=2100,
-    )
-    intended_entry_term: Literal["fall", "spring", "summer", "winter"] = "fall"
 
 
 class TargetProgram(BaseModel):
@@ -282,6 +277,13 @@ RequirementVerificationStatus = Literal[
     "model_memory_unverified",
     "user_supplied",
 ]
+RequirementTemporalApplicability = Literal[
+    "target_cycle_confirmed",
+    "undated",
+    "previous_cycle",
+    "not_yet_published",
+    "unknown",
+]
 
 REQUIREMENT_CATEGORIES: List[str] = [
     "academic",
@@ -303,10 +305,37 @@ class RequirementItem(BaseModel):
     source_type: RequirementSourceType
     verification_status: RequirementVerificationStatus
     source_url: Optional[str] = None
+    source_cycle: Optional[str] = None
+    temporal_applicability: RequirementTemporalApplicability
+    temporal_note: Optional[str] = None
+
+    @field_validator("importance", mode="before")
+    @classmethod
+    def normalize_importance(cls, value: Any) -> Any:
+        if value == "conditional_required":
+            logger.warning(
+                "requirements_importance_alias value=%r normalized=required",
+                value,
+            )
+            return "required"
+        return value
 
 
 class RequirementsExtraction(BaseModel):
     requirements: List[RequirementItem] = Field(default_factory=list)
+
+
+class RequirementsSearchAudit(BaseModel):
+    search_attempts_completed: int = Field(ge=1, le=2)
+    programme_page_checked: bool
+    sections_checked: List[str] = Field(default_factory=list)
+    programme_page_has_no_extractable_requirements: bool = False
+    empty_result_reason: Optional[str] = None
+
+
+class RequirementsWebSearchOutput(BaseModel):
+    requirements: List[RequirementItem] = Field(default_factory=list)
+    search_audit: Optional[RequirementsSearchAudit] = None
 
 
 class RequirementCategoryReview(BaseModel):
@@ -322,6 +351,7 @@ class TargetProgramRequirementsReview(BaseModel):
 
 
 EvidenceAvailability = Literal["known", "known_negative", "unknown"]
+EvidenceSlotStatus = Literal["known", "known_negative", "unknown", "missing"]
 GapStatus = Literal["met", "partial", "not_met", "unknown"]
 GapMatchStrategy = Literal["deterministic", "semantic", "hybrid"]
 GapEvidenceType = Literal[
@@ -361,6 +391,12 @@ class GapEvidenceNeed(BaseModel):
     evidence_type: GapEvidenceType
     label: str = ""
     already_known: bool = False
+    required_fields: List[str] = Field(default_factory=list)
+    evidence_group: Optional[str] = None
+    group_relation: Literal["all", "any"] = "all"
+    minimum: Optional[float] = None
+    component_minimum: Optional[float] = None
+    required_quantity: Optional[float] = None
 
     @field_validator("evidence_type", mode="before")
     @classmethod
@@ -423,6 +459,9 @@ class GapPlannedRequirement(GapPlannerRequirementDraft):
         "official_verified", "model_memory_unverified", "user_supplied"
     ]
     source_url: Optional[str] = None
+    source_cycle: Optional[str] = None
+    temporal_applicability: RequirementTemporalApplicability
+    temporal_note: Optional[str] = None
 
 
 class GapPlan(BaseModel):
@@ -444,10 +483,15 @@ class GapEvidenceParseRequest(BaseModel):
     question: GapPlannerQuestion
     evidence_needs: List[GapEvidenceNeed]
     answer: str = Field(min_length=1)
+    existing_evidence: List[UserEvidence] = Field(default_factory=list)
 
 
 class GapEvidenceParseResponse(BaseModel):
     evidence: List[UserEvidence]
+    missing_slots: List[str] = Field(default_factory=list)
+    follow_up_question: Optional[str] = None
+    satisfied_evidence_groups: List[str] = Field(default_factory=list)
+    slot_states: Dict[str, EvidenceSlotStatus] = Field(default_factory=dict)
 
 
 class SemanticGapJudgement(BaseModel):
@@ -470,11 +514,15 @@ class GapResult(BaseModel):
     requirement_verification_status: Literal[
         "official_verified", "model_memory_unverified", "user_supplied"
     ]
+    importance: RequirementImportance = "unknown"
     status: GapStatus
     user_evidence: str
     gap: str
     reason: str
     source_url: Optional[str] = None
+    source_cycle: Optional[str] = None
+    temporal_applicability: RequirementTemporalApplicability
+    temporal_note: Optional[str] = None
 
 
 class GapAnalysisRequest(BaseModel):
@@ -489,6 +537,65 @@ class GapAnalysisResponse(BaseModel):
     results: List[GapResult]
     informational_requirements: List[GapPlannedRequirement] = Field(default_factory=list)
     semantic_llm_requests: int = 0
+
+
+PlanningActionKind = Literal[
+    "complete_gap",
+    "resolve_gap",
+    "confirm_information",
+]
+PlanningPriority = Literal["high", "medium", "optional"]
+PlanningTrack = Literal["main", "optional"]
+PlanningActionStatus = Literal["pending", "in_progress", "completed", "blocked"]
+
+
+class ActionPlanRequest(BaseModel):
+    target_program: TargetProgram
+    gap_analysis: GapAnalysisResponse
+    application_timeline: ApplicationTimeline
+
+
+class DeepSeekPlanningActionDraft(BaseModel):
+    action_id: str = Field(min_length=1)
+    action: str = Field(min_length=1)
+    time_period: str = Field(min_length=1)
+    target_date: Optional[str] = None
+    source_gap_id: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    status: PlanningActionStatus = "pending"
+    depends_on: List[str] = Field(default_factory=list)
+    parallel_group: Optional[str] = None
+
+
+class DeepSeekActionPlanContent(BaseModel):
+    actions: List[DeepSeekPlanningActionDraft] = Field(default_factory=list)
+
+
+class PlanningActionDraft(DeepSeekPlanningActionDraft):
+    action_kind: PlanningActionKind
+
+
+class DeepSeekActionPlanOutput(BaseModel):
+    actions: List[PlanningActionDraft] = Field(default_factory=list)
+
+
+class PlanningAction(PlanningActionDraft):
+    priority: PlanningPriority
+    requirement_type: RequirementImportance
+    plan_track: PlanningTrack
+
+
+class ActionPlan(BaseModel):
+    target_program: TargetProgram
+    generated_at: str
+    current_date: str
+    timeline_status: Literal["complete", "partial", "not_found"]
+    application_deadline: Optional[str] = None
+    application_deadline_label: Optional[str] = None
+    deadline_is_precise: bool = False
+    ready_by_date: Optional[str] = None
+    actions: List[PlanningAction] = Field(default_factory=list)
+    planning_llm_requests: int = 1
 
 
 class OverallRanking(BaseModel):
@@ -989,6 +1096,16 @@ async def discover_candidate_universities(
 StructuredOutputT = TypeVar("StructuredOutputT", bound=BaseModel)
 
 
+class DeepSeekWebSearchNoFinalTextError(HTTPException):
+    """HTTP 200 response had parseable JSON but no usable final text block."""
+
+    def __init__(self, schema_name: str) -> None:
+        super().__init__(
+            status_code=502,
+            detail=f"DeepSeek Web Search returned malformed {schema_name} data",
+        )
+
+
 def parse_json_object(text: str) -> Dict[str, Any]:
     """Extract one JSON object from otherwise well-formed model wrapper text."""
     try:
@@ -1079,13 +1196,41 @@ async def call_deepseek_web_search(
     try:
         payload = response.json()
         output = payload.get("content", [])
+        content_block_types = [
+            str(item.get("type") or "unknown")
+            for item in output
+            if isinstance(item, dict)
+        ]
+        tool_block_count = sum(
+            "tool" in block_type.casefold() for block_type in content_block_types
+        )
+        web_search_block_count = sum(
+            (
+                "web_search" in str(item.get("type") or "").casefold()
+                or str(item.get("name") or "").casefold() == "web_search"
+            )
+            for item in output
+            if isinstance(item, dict)
+        )
         text = "\n".join(
             str(item.get("text") or "")
             for item in output
             if isinstance(item, dict) and item.get("type") == "text"
         ).strip()
+        logger.info(
+            "deepseek_web_search_response schema=%s stop_reason=%s usage=%s "
+            "content_block_types=%s tool_block_count=%d web_search_block_count=%d "
+            "final_text_length=%d",
+            schema_name,
+            payload.get("stop_reason"),
+            payload.get("usage"),
+            content_block_types,
+            tool_block_count,
+            web_search_block_count,
+            len(text),
+        )
         if not text:
-            raise ValueError("response did not contain a final text block")
+            raise DeepSeekWebSearchNoFinalTextError(schema_name)
         structured_value = parse_json_object(text)
         try:
             return output_model.model_validate(structured_value)
@@ -1252,8 +1397,6 @@ async def confirm_target_program(
         program=program,
         official_program_url=program_url,
         official_domain=(urlparse(program_url).hostname or ""),
-        intended_entry_year=request.intended_entry_year,
-        intended_entry_term=request.intended_entry_term,
     )
 
 
@@ -1274,6 +1417,296 @@ async def confirm_target_program_endpoint(
         raise HTTPException(status_code=504, detail="项目确认超时，请重试。") from error
 
 
+class OfficialProgrammePageTextParser(HTMLParser):
+    hidden_tags = {"script", "style", "noscript", "svg", "template"}
+    block_tags = {
+        "article",
+        "aside",
+        "br",
+        "dd",
+        "div",
+        "dl",
+        "dt",
+        "footer",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "header",
+        "li",
+        "main",
+        "nav",
+        "p",
+        "section",
+        "table",
+        "td",
+        "th",
+        "tr",
+        "ul",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.hidden_depth = 0
+        self.blocks: List[str] = []
+        self.current: List[str] = []
+
+    def flush(self) -> None:
+        text = re.sub(r"\s+", " ", " ".join(self.current)).strip()
+        if text:
+            self.blocks.append(text)
+        self.current = []
+
+    def handle_starttag(self, tag: str, attrs: List[tuple[str, Optional[str]]]) -> None:
+        lowered = tag.casefold()
+        if lowered in self.hidden_tags:
+            self.hidden_depth += 1
+        elif lowered in self.block_tags and self.hidden_depth == 0:
+            self.flush()
+
+    def handle_endtag(self, tag: str) -> None:
+        lowered = tag.casefold()
+        if lowered in self.hidden_tags:
+            self.hidden_depth = max(0, self.hidden_depth - 1)
+        elif lowered in self.block_tags and self.hidden_depth == 0:
+            self.flush()
+
+    def handle_data(self, data: str) -> None:
+        if self.hidden_depth == 0 and data.strip():
+            self.current.append(data.strip())
+
+    def text(self) -> str:
+        self.flush()
+        full_text = "\n".join(self.blocks)
+        if len(full_text) <= OFFICIAL_PROGRAM_PAGE_MAX_CHARS:
+            return full_text
+
+        section_markers = re.compile(
+            r"entry requirements?|admissions?|how to apply|supporting documents?|"
+            r"portfolio|personal statement|statement of purpose|english language|"
+            r"qualifications?|eligibility|references?|transcripts?|application video",
+            re.IGNORECASE,
+        )
+        selected_indexes = set(range(min(80, len(self.blocks))))
+        for index, block in enumerate(self.blocks):
+            if section_markers.search(block):
+                selected_indexes.update(
+                    range(max(0, index - 3), min(len(self.blocks), index + 31))
+                )
+        selected = "\n".join(
+            self.blocks[index] for index in sorted(selected_indexes)
+        )
+        return selected[:OFFICIAL_PROGRAM_PAGE_MAX_CHARS]
+
+
+async def ensure_public_direct_fetch_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise HTTPException(status_code=502, detail="Official programme URL is not fetchable")
+    hostname = parsed.hostname.casefold()
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        raise HTTPException(status_code=502, detail="Official programme URL is not public")
+    try:
+        literal_address = ipaddress.ip_address(hostname)
+    except ValueError:
+        literal_address = None
+    if literal_address is not None:
+        if not literal_address.is_global:
+            raise HTTPException(status_code=502, detail="Official programme URL is not public")
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        addresses = await loop.run_in_executor(
+            None,
+            partial(
+                socket.getaddrinfo,
+                hostname,
+                parsed.port or (443 if parsed.scheme == "https" else 80),
+                type=socket.SOCK_STREAM,
+            ),
+        )
+    except OSError as error:
+        raise HTTPException(
+            status_code=502,
+            detail="Unable to resolve official programme URL",
+        ) from error
+    if not addresses or any(
+        not ipaddress.ip_address(address[4][0]).is_global for address in addresses
+    ):
+        raise HTTPException(status_code=502, detail="Official programme URL is not public")
+
+
+async def fetch_official_program_page_text(url: str) -> str:
+    current_url = url.strip()
+    async with httpx.AsyncClient(
+        trust_env=False,
+        timeout=OFFICIAL_PROGRAM_PAGE_TIMEOUT_SECONDS,
+        follow_redirects=False,
+        headers={"User-Agent": "UniversityApplyPlan/1.0 Requirements fallback"},
+    ) as client:
+        for redirect_count in range(OFFICIAL_PROGRAM_PAGE_MAX_REDIRECTS + 1):
+            await ensure_public_direct_fetch_url(current_url)
+            try:
+                response = await client.get(current_url)
+            except httpx.TimeoutException as error:
+                raise HTTPException(
+                    status_code=504,
+                    detail="Official programme page fetch timed out",
+                ) from error
+            except httpx.RequestError as error:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Unable to fetch official programme page",
+                ) from error
+            if response.is_redirect:
+                location = response.headers.get("location")
+                if not location or redirect_count >= OFFICIAL_PROGRAM_PAGE_MAX_REDIRECTS:
+                    raise HTTPException(
+                        status_code=502,
+                        detail="Official programme page redirect could not be followed",
+                    )
+                current_url = urljoin(current_url, location)
+                continue
+            if response.is_error:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Official programme page returned HTTP "
+                        f"{response.status_code}"
+                    ),
+                )
+            content_type = response.headers.get("content-type", "").casefold()
+            if "html" not in content_type and "text" not in content_type:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Official programme page did not return HTML text",
+                )
+            parser = OfficialProgrammePageTextParser()
+            parser.feed(response.text)
+            page_text = parser.text().strip()
+            if not page_text:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Official programme page contained no readable text",
+                )
+            return page_text
+    raise HTTPException(status_code=502, detail="Official programme page fetch failed")
+
+
+REQUIREMENTS_TEMPORAL_CONTRACT = (
+    "TEMPORAL APPLICABILITY CONTRACT — read intended_entry_year and intended_entry_term from "
+    "the supplied target programme and classify every Requirement independently from its "
+    "provenance:\n"
+    "- If the official page explicitly covers the target entry cycle, use "
+    "temporal_applicability=target_cycle_confirmed and record the explicit source_cycle.\n"
+    "- If the current official page gives no explicit year or entry cycle, use "
+    "temporal_applicability=undated and source_cycle=null. Do not invent a cycle.\n"
+    "- If the page explicitly belongs to a different application or entry cycle, use "
+    "temporal_applicability=previous_cycle and record source_cycle. It may be returned as a "
+    "reference, but must not be described as confirmed for the target cycle.\n"
+    "- If the page explicitly says the target-cycle information has not yet been published and "
+    "there is no current-cycle Requirement to extract, use "
+    "temporal_applicability=not_yet_published and explain this in temporal_note.\n"
+    "- If cycle labels conflict or applicability cannot be determined, use "
+    "temporal_applicability=unknown and explain the uncertainty in temporal_note.\n"
+    "Official provenance and temporal applicability are orthogonal. Keep official facts from a "
+    "previous cycle as verification_status=official_verified; never downgrade them to "
+    "model_memory_unverified merely because their cycle differs."
+)
+
+REQUIREMENTS_IMPORTANCE_CONTRACT = (
+    "IMPORTANCE ENUM CONTRACT:\n"
+    "- importance must be exactly one of: required, recommended, preferred, unknown.\n"
+    "- The phrase conditional-required describes extraction priority only; "
+    "conditional_required is not a valid importance value.\n"
+    "- For a conditional Requirement, output importance=required and preserve the complete "
+    "applicability condition in the requirement text.\n"
+)
+
+
+async def extract_requirements_from_official_program_page(
+    target_program: TargetProgram,
+) -> RequirementsExtraction:
+    page_text = await fetch_official_program_page_text(
+        target_program.official_program_url
+    )
+    prompt = (
+        "Extract application Requirements only from the supplied official programme page "
+        "text. Do not use Web Search, model memory, or facts not explicitly supported by the "
+        "page context. Look for Entry requirements, Admissions, How to apply, Supporting "
+        "documents, Portfolio, Personal statement, application video, English language, "
+        "academic eligibility, and other application requirements. Return partial coverage "
+        "when only some requirements are present; return requirements=[] only when the supplied "
+        "page text contains no extractable application Requirement.\n\n"
+        "EXTRACTION PRIORITY AND COMPLETENESS RULES:\n"
+        "- Select and order items by this fixed priority: required eligibility and required "
+        "application materials first; then conditional-required items; then recommended or "
+        "preferred items; and finally administrative or contextual information. Never let an "
+        "optional, administrative, or contextual item displace an independent required or "
+        "conditional-required item.\n"
+        "- Before finishing, inventory every mandatory supporting document actually named by "
+        "the supplied official page. Check for transcripts, degree certificates, CVs or "
+        "resumes, references or recommendation letters, statements, portfolios or work "
+        "samples, identification documents, and programme-specific forms, sheets, or "
+        "questionnaires, as well as other mandatory application documents. These are generic "
+        "document types, not an exhaustive list. A materials category containing one item is "
+        "not evidence that the inventory is complete.\n"
+        "- Also check academic and course eligibility, standardized or language requirements, "
+        "experience requirements, and conditional applicability. Include every independent "
+        "required item actually present, preserving quantities, word/page/time limits, scores, "
+        "component thresholds, exceptions, and AND/OR conditions. Do not merge or omit separate "
+        "required materials merely to shorten the response.\n"
+        "- There is no numeric item limit for required or conditional-required Requirements. "
+        "Return every supported item at those priorities. Keep recommended/preferred items "
+        "concise, and include at most three low-priority administrative/contextual items after "
+        "all higher-priority items. Application deadlines, opening dates, and application-cycle "
+        "dates belong to Timeline Retrieval and must not be returned as Requirements. Each item "
+        "must include an English requirement and a faithful concise Chinese requirement_zh.\n\n"
+        f"{REQUIREMENTS_IMPORTANCE_CONTRACT}\n"
+        f"{REQUIREMENTS_TEMPORAL_CONTRACT}\n\n"
+        "For every extracted item set "
+        "source_level=program, source_type=official_retrieval, "
+        "verification_status=official_verified, and source_url to the supplied exact official "
+        "programme URL. Return only JSON.\n\n"
+        f"Target programme: {target_program.model_dump_json()}\n"
+        f"Output JSON Schema: {json.dumps(RequirementsExtraction.model_json_schema(), ensure_ascii=False)}\n\n"
+        "OFFICIAL PROGRAMME PAGE TEXT:\n"
+        f"{page_text}"
+    )
+    content = await call_deepseek(
+        messages=[
+            {
+                "role": "system",
+                "content": "Extract only Requirements supported by the provided official page text.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=7000,
+        response_format={"type": "json_object"},
+    )
+    try:
+        extraction = RequirementsExtraction.model_validate_json(content)
+    except ValidationError as error:
+        raise HTTPException(
+            status_code=502,
+            detail="DeepSeek returned invalid direct-fetch Requirements data",
+        ) from error
+    normalized = [
+        item.model_copy(
+            update={
+                "source_level": "program",
+                "source_type": "official_retrieval",
+                "verification_status": "official_verified",
+                "source_url": target_program.official_program_url,
+            }
+        )
+        for item in extraction.requirements
+    ]
+    return RequirementsExtraction(requirements=normalized)
+
+
 async def retrieve_target_program_requirements(
     target_program: TargetProgram,
 ) -> TargetProgramRequirementsReview:
@@ -1289,6 +1722,9 @@ async def retrieve_target_program_requirements(
                 "source_type": "official_retrieval",
                 "verification_status": "official_verified",
                 "source_url": "https://university.example/program/requirements",
+                "source_cycle": "Fall 2027",
+                "temporal_applicability": "target_cycle_confirmed",
+                "temporal_note": None,
             },
             {
                 "category": "materials",
@@ -1299,67 +1735,196 @@ async def retrieve_target_program_requirements(
                 "source_type": "model_memory",
                 "verification_status": "model_memory_unverified",
                 "source_url": None,
+                "source_cycle": None,
+                "temporal_applicability": "unknown",
+                "temporal_note": "The applicable entry cycle could not be confirmed.",
             }
-        ]
+        ],
+        "search_audit": {
+            "search_attempts_completed": 2,
+            "programme_page_checked": True,
+            "sections_checked": [
+                "Entry requirements",
+                "Supporting documents",
+                "English language requirements",
+            ],
+            "programme_page_has_no_extractable_requirements": False,
+            "empty_result_reason": None,
+        },
     }
     prompt = (
-        "Use Web Search to produce a useful application Requirements snapshot for this exact "
-        "master's programme. Your task is not limited to reporting requirements whose full "
-        "official page text is currently accessible. For each of the seven categories "
-        "academic, course, language, standardized_test, experience, materials, and other, "
-        "apply this priority: current official source first; otherwise a reasonable "
-        "best-effort AI reference; otherwise no item for that category.\n\n"
-        "First search, open, read, and judge relevant current programme, department, and "
-        "university pages. When you have a reasonable current official source, use "
-        "source_type=official_retrieval, verification_status=official_verified, and include "
-        "its source_url. These internal values mean product status official_source.\n\n"
-        "If an official page is blocked by 403/WAF, inaccessible, incomplete, available only "
-        "through a search-result summary, or insufficient to confirm a category, do not "
-        "automatically omit that category. Continue best-effort within this same task using "
-        "the information available to you: other searches, result summaries, other public "
-        "pages, and your existing knowledge. When that produces a reasonable reference, use "
-        "source_type=model_memory and verification_status=model_memory_unverified. These "
-        "internal compatibility values mean product status ai_reference; they do not imply "
-        "that the information came only from training memory. Use source_level=unknown. A "
-        "reference URL may be retained when useful, but it does not upgrade the item to an "
-        "official source. Use source_url=null when no reliable reference URL is available.\n\n"
-        "Keep the research phase short: use no more than two Web Search calls. Complete only "
-        "the necessary searches, then immediately output the final structured JSON; do not "
-        "continue searching for exhaustive coverage. If official information remains "
-        "inaccessible or incomplete, stop searching and use the existing ai_reference "
-        "mechanism with your reasonable available information and existing knowledge. "
-        "Prioritize returning one complete final JSON object over further research. You must "
-        "finish with final JSON even when the result is sparse.\n\n"
-        "The product explicitly accepts cautious planning references when a current official "
-        "fact cannot be confirmed. If you know a plausible or commonly reported requirement "
-        "for the programme, institution, degree type, or closely related application process, "
-        "prefer a carefully qualified AI reference (for example using may, typically, or "
-        "applicants should check) over immediately omitting the category. Mark it as "
-        "model_memory_unverified, normally use importance=unknown, and never present it as a "
-        "confirmed current fact. This applies especially when you have useful planning "
-        "information about academic background, language expectations, or application "
-        "materials, but it does not require filling categories you genuinely know nothing "
-        "about.\n\n"
-        "Only omit a category when you have neither usable official information nor a "
-        "reasonable AI reference. Do not invent an answer merely to fill all seven categories, "
-        "and do not infer that something is not required merely because it was not mentioned. "
-        "Return at most twelve concise requirements. Preserve every score, threshold, "
-        "exception, and AND/OR condition. Return both the English requirement and a faithful "
-        "concise Chinese requirement_zh in this same response. For AI references, use "
-        "importance=unknown unless the requirement's modality is reasonably known.\n\n"
-        "Do not narrate the research process, search steps, access failures, or reasoning. "
-        "Do not explain the result. Finish the final JSON promptly and return only one JSON "
+        "Use Web Search to extract the current application requirements for this exact "
+        "master's programme. Cover academic, course, language, standardized_test, experience, "
+        "materials, and other when evidence exists.\n\n"
+        "SECTION-LEVEL SEARCH CONTRACT — use at most two Web Search calls and keep all credible "
+        "requirements found across both results:\n"
+        "1. When official_program_url is known, the first search must be anchored to that exact "
+        "URL, exact programme name, and official domain. Its search intent must cover Entry "
+        "requirements / Admissions / How to apply / Portfolio / Supporting documents. Treat "
+        "the programme page as the mandatory primary source. Inspect headings, anchors, tabs, "
+        "accordions, and sections below the overview; an overview-only hit is not sufficient.\n"
+        "2. After the first result, assess the accumulated programme-level evidence. If it is "
+        "empty, overview-only, missing likely application sections, or the mandatory supporting-"
+        "document inventory is still clearly incomplete, you must use the second search before "
+        "returning. Finding one materials item does not make supporting-document coverage "
+        "complete. Anchor the second search again to the exact programme name and official "
+        "domain, targeting the missing Entry requirements / Admissions / How to apply / "
+        "Supporting documents / Application checklist / programme-specific application "
+        "requirements / Portfolio / English language requirements sections. The "
+        "second search supplements the first; it must not discard requirements already found.\n"
+        "After the second result, or sooner only when programme-level coverage is sufficient, "
+        "stop searching and immediately output the complete JSON. Never pursue exhaustive "
+        "search.\n\n"
+        "EMPTY-RESULT GATE:\n"
+        "- Do not return requirements=[] merely because one search did not directly surface a "
+        "section. If the first result is insufficient, perform the second section-focused "
+        "search.\n"
+        "- requirements=[] is allowed only when both search attempts still provide no "
+        "sufficiently credible requirement information, or when the target programme page "
+        "itself clearly has no extractable application requirements.\n"
+        "- If any credible programme-level requirement is found, output every confirmed item. "
+        "Partial coverage is valid and preferred over discarding the entire result because "
+        "other sections remain incomplete.\n\n"
+        "EXTRACTION PRIORITY AND COMPLETENESS RULES:\n"
+        "- Select and order items by this fixed priority: required eligibility and required "
+        "application materials first; then conditional-required items; then recommended or "
+        "preferred items; and finally administrative or contextual information. Never let an "
+        "optional, administrative, or contextual item displace an independent required or "
+        "conditional-required item.\n"
+        "- Before finishing, inventory every mandatory supporting document actually named by "
+        "the official sources. Check for transcripts, degree certificates, CVs or resumes, "
+        "references or recommendation letters, statements, portfolios or work samples, "
+        "identification documents, and programme-specific forms, sheets, or questionnaires, "
+        "as well as other mandatory application documents. These are generic document types, "
+        "not an exhaustive list. A materials category containing one item is not evidence that "
+        "the inventory is complete.\n"
+        "- Also check academic and course eligibility, standardized or language requirements, "
+        "experience requirements, and conditional applicability. Include every independent "
+        "required item actually present, preserving quantities, word/page/time limits, scores, "
+        "component thresholds, exceptions, and AND/OR conditions. Do not merge or omit separate "
+        "required materials merely to shorten the response.\n"
+        "- Facts found on the exact programme page are programme-level official evidence: use "
+        "source_type=official_retrieval, verification_status=official_verified, "
+        "source_level=program, and that exact page as source_url. Other current official pages "
+        "use their applicable source level and URL.\n"
+        "- If official information is blocked, inaccessible, incomplete, or available only in "
+        "a search summary, use the existing ai_reference mechanism for a reasonable cautious "
+        "reference: source_type=model_memory, verification_status=model_memory_unverified, "
+        "source_level=unknown, normally importance=unknown, and source_url=null unless a useful "
+        "reference URL exists. Never present it as confirmed official fact.\n"
+        "- Only omit a category when neither official evidence nor a reasonable AI reference "
+        "exists. Do not invent facts or infer that an unmentioned item is not required.\n"
+        "- There is no numeric item limit for required or conditional-required Requirements. "
+        "Return every supported item at those priorities. Keep recommended/preferred items "
+        "concise, and include at most three low-priority administrative/contextual items after "
+        "all higher-priority items. Application deadlines, opening dates, and application-cycle "
+        "dates belong to Timeline Retrieval and must not be returned as Requirements. Each item "
+        "must include an English requirement and a faithful concise Chinese requirement_zh.\n\n"
+        f"{REQUIREMENTS_IMPORTANCE_CONTRACT}\n"
+        f"{REQUIREMENTS_TEMPORAL_CONTRACT}\n\n"
+        "SEARCH AUDIT OUTPUT:\n"
+        "- search_audit.search_attempts_completed must report how many of the allowed searches "
+        "were actually completed.\n"
+        "- programme_page_checked is true only when the exact programme URL or an exact-page "
+        "search result was examined. sections_checked lists the application section names "
+        "actually sought.\n"
+        "- programme_page_has_no_extractable_requirements may be true only when available "
+        "evidence affirmatively indicates that the target page has no extractable application "
+        "requirements; failure to surface a section in one search is not enough.\n"
+        "- When requirements is empty, empty_result_reason is mandatory and must explain why "
+        "the two-search gate or confirmed no-requirements condition was satisfied.\n\n"
+        "Return a complete final JSON even when sparse. Do not narrate searches, failures, or "
+        "reasoning outside the structured search_audit. Return only one JSON "
         "object shaped exactly like this example:\n"
         f"{json.dumps(output_example, ensure_ascii=False)}\n\n"
         f"Target programme: {json.dumps(target_program.model_dump(), ensure_ascii=False)}"
     )
-    extraction = await call_deepseek_web_search(
-        prompt,
-        RequirementsExtraction,
-        schema_name="program_requirements",
-        max_output_tokens=7000,
-        max_search_uses=2,
+    try:
+        result = await call_deepseek_web_search(
+            prompt,
+            RequirementsWebSearchOutput,
+            schema_name="program_requirements",
+            max_output_tokens=14000,
+            max_search_uses=2,
+        )
+    except DeepSeekWebSearchNoFinalTextError:
+        if not target_program.official_program_url.strip():
+            raise
+        logger.warning(
+            "requirements_search_no_final_text_using_direct_fetch program=%r url=%s",
+            target_program.program,
+            target_program.official_program_url,
+        )
+        result = RequirementsWebSearchOutput(requirements=[])
+    audit = result.search_audit
+    logger.info(
+        "requirements_section_recall program=%r search_attempts=%s programme_page_checked=%s "
+        "sections_checked=%s requirement_count=%d",
+        target_program.program,
+        audit.search_attempts_completed if audit else "unreported",
+        audit.programme_page_checked if audit else "unreported",
+        audit.sections_checked if audit else [],
+        len(result.requirements),
     )
+    if not result.requirements:
+        empty_allowed = (
+            audit is not None
+            and (
+                audit.search_attempts_completed == 2
+                or (
+                    audit.programme_page_checked
+                    and audit.programme_page_has_no_extractable_requirements
+                )
+            )
+        )
+        contract_error: Optional[HTTPException] = None
+        if not empty_allowed:
+            contract_error = HTTPException(
+                status_code=502,
+                detail=(
+                    "DeepSeek Requirements search ended empty before completing the "
+                    "section-level recall contract"
+                ),
+            )
+        elif audit is None or not audit.empty_result_reason:
+            contract_error = HTTPException(
+                status_code=502,
+                detail="DeepSeek Requirements search returned an unjustified empty result",
+            )
+        if contract_error is not None:
+            if not target_program.official_program_url.strip():
+                raise contract_error
+            fallback_started = datetime.now(timezone.utc)
+            logger.info(
+                "requirements_direct_fetch_fallback_triggered program=%r url=%s",
+                target_program.program,
+                target_program.official_program_url,
+            )
+            try:
+                fallback = await extract_requirements_from_official_program_page(
+                    target_program
+                )
+            except Exception as error:
+                logger.warning(
+                    "requirements_direct_fetch_fallback_failed program=%r error=%s",
+                    target_program.program,
+                    safe_error_message(error, os.getenv("DEEPSEEK_API_KEY", "")),
+                )
+                raise contract_error from error
+            if not fallback.requirements:
+                logger.warning(
+                    "requirements_direct_fetch_fallback_empty program=%r",
+                    target_program.program,
+                )
+                raise contract_error
+            logger.info(
+                "requirements_direct_fetch_fallback_succeeded program=%r count=%d elapsed_seconds=%.3f",
+                target_program.program,
+                len(fallback.requirements),
+                (datetime.now(timezone.utc) - fallback_started).total_seconds(),
+            )
+            return requirements_review_from_extraction(target_program, fallback)
+    extraction = RequirementsExtraction(requirements=result.requirements)
     return requirements_review_from_extraction(target_program, extraction)
 
 
@@ -1462,7 +2027,9 @@ async def retrieve_application_timeline(
         "target programme and intended entry cycle below. Use only current official "
         "university information. Do not use model memory, historical assumptions, third-party "
         "dates, or AI reference dates. If a date cannot be supported by a current official "
-        "source, return null or omit the deadline.\n\n"
+        "source, return null or omit the deadline. If the requested future entry cycle has not "
+        "yet been published, set status=not_found and return no dates. Never reuse or relabel "
+        "dates from another entry year or term as dates for the requested cycle.\n\n"
         "Search in this semantic priority: the official programme page, then the official "
         "department page, then the university's official graduate admissions page. You decide "
         "which pages are applicable; the backend will not verify or rerank them. Keep every "
@@ -1643,9 +2210,66 @@ def formal_gap_requirements(
                     "importance": requirement.importance,
                     "requirement_verification_status": requirement.verification_status,
                     "source_url": requirement.source_url,
+                    "source_cycle": requirement.source_cycle,
+                    "temporal_applicability": requirement.temporal_applicability,
+                    "temporal_note": requirement.temporal_note,
                 }
             )
     return formal
+
+
+def requirement_is_temporally_matchable(
+    temporal_applicability: RequirementTemporalApplicability,
+) -> bool:
+    return temporal_applicability in {"target_cycle_confirmed", "undated"}
+
+
+def temporal_gap_explanation(
+    temporal_applicability: RequirementTemporalApplicability,
+    source_cycle: Optional[str],
+    temporal_note: Optional[str],
+) -> tuple[str, str]:
+    if temporal_applicability == "previous_cycle":
+        cycle = f"（来源周期：{source_cycle}）" if source_cycle else ""
+        return (
+            "仅作上一周期参考",
+            temporal_note
+            or f"该要求来自其他申请周期{cycle}，尚未确认适用于目标申请周期。",
+        )
+    if temporal_applicability == "not_yet_published":
+        return (
+            "目标周期要求尚未发布",
+            temporal_note or "官方尚未发布目标申请周期的相关要求，不执行硬性匹配。",
+        )
+    return (
+        "目标周期适用性待确认",
+        temporal_note or "当前来源的周期适用性无法确定，不执行硬性匹配。",
+    )
+
+
+def required_fields_for_evidence_need(
+    need: GapEvidenceNeed,
+    constraint: GapDeterministicConstraint,
+) -> List[str]:
+    matching_options = [
+        option for option in constraint.options if option.key.casefold() == need.key.casefold()
+    ]
+    if need.evidence_type in {"language_score", "standardized_score", "academic_score"}:
+        fields = ["score"]
+        if need.evidence_type == "language_score" and any(
+            option.component_minimum is not None for option in matching_options
+        ):
+            fields.extend(["listening", "reading", "writing", "speaking"])
+        return fields
+    if need.evidence_type == "material_quantity":
+        return ["quantity"]
+    if need.evidence_type == "material_status":
+        return ["status"]
+    if need.evidence_type == "experience" and any(
+        option.kind == "experience_duration" for option in matching_options
+    ):
+        return ["description", "duration"]
+    return ["description"]
 
 
 async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
@@ -1723,7 +2347,7 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
         for item in draft.requirements
         if item.requirement_id in formal_by_id
     }
-    known_keys = {item.key.casefold() for item in reusable}
+    reusable_by_key = {item.key.casefold(): item for item in reusable}
     planned: List[GapPlannedRequirement] = []
     needs_by_key: Dict[str, GapEvidenceNeed] = {}
     for requirement_id, formal in formal_by_id.items():
@@ -1741,13 +2365,47 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
                     )
                 ],
             )
+        temporally_matchable = requirement_is_temporally_matchable(
+            formal["temporal_applicability"]
+        )
         normalized_needs = []
         for need in item.evidence_needs:
+            matching_option = next(
+                (
+                    option
+                    for option in item.constraint.options
+                    if option.key.casefold() == need.key.casefold()
+                ),
+                None,
+            )
             normalized = need.model_copy(
-                update={"already_known": need.key.casefold() in known_keys}
+                update={
+                    "required_fields": required_fields_for_evidence_need(
+                        need,
+                        item.constraint,
+                    ),
+                    "evidence_group": (
+                        f"{requirement_id}:alternatives"
+                        if item.constraint.relation == "any"
+                        else requirement_id
+                    ),
+                    "group_relation": item.constraint.relation,
+                    "minimum": matching_option.minimum if matching_option else None,
+                    "component_minimum": (
+                        matching_option.component_minimum if matching_option else None
+                    ),
+                    "required_quantity": (
+                        matching_option.required_quantity if matching_option else None
+                    ),
+                }
+            )
+            reusable_item = reusable_by_key.get(need.key.casefold())
+            normalized.already_known = bool(
+                reusable_item
+                and evidence_is_terminal_for_need(normalized, reusable_item)
             )
             normalized_needs.append(normalized)
-            if item.matchable:
+            if item.matchable and temporally_matchable:
                 needs_by_key[need.key.casefold()] = normalized
         match_strategy = item.match_strategy
         option_kinds = {option.kind for option in item.constraint.options if option.kind}
@@ -1764,16 +2422,42 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
         planned.append(
             GapPlannedRequirement(
                 **formal,
-                matchable=item.matchable,
-                informational_reason=item.informational_reason,
+                matchable=item.matchable and temporally_matchable,
+                informational_reason=(
+                    item.informational_reason
+                    if temporally_matchable
+                    else temporal_gap_explanation(
+                        formal["temporal_applicability"],
+                        formal["source_cycle"],
+                        formal["temporal_note"],
+                    )[1]
+                ),
                 match_strategy=match_strategy,
-                evidence_needs=normalized_needs,
-                constraint=item.constraint,
+                evidence_needs=normalized_needs if temporally_matchable else [],
+                constraint=(
+                    item.constraint
+                    if temporally_matchable
+                    else GapDeterministicConstraint()
+                ),
             )
         )
 
     questions = []
     covered_missing_keys = set()
+    reusable_any_groups: Dict[str, List[GapEvidenceNeed]] = {}
+    for item in planned:
+        for need in item.evidence_needs:
+            if need.evidence_group and need.group_relation == "any":
+                reusable_any_groups.setdefault(need.evidence_group, []).append(need)
+    satisfied_reusable_groups = {
+        group
+        for group, needs in reusable_any_groups.items()
+        if any(
+            evidence_satisfies_need(need, reusable_by_key[need.key.casefold()])
+            for need in needs
+            if need.key.casefold() in reusable_by_key
+        )
+    }
     ai_reference_keys = {
         need.key.casefold()
         for item in planned
@@ -1785,7 +2469,9 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
             key
             for key in question.evidence_keys
             if key.casefold() in needs_by_key
-            and key.casefold() not in known_keys
+            and not needs_by_key[key.casefold()].already_known
+            and needs_by_key[key.casefold()].evidence_group
+            not in satisfied_reusable_groups
         ]
         if not missing_keys:
             continue
@@ -1814,6 +2500,7 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
             for need in item.evidence_needs
             if not need.already_known
             and need.key.casefold() not in covered_missing_keys
+            and need.evidence_group not in satisfied_reusable_groups
         ]
         if not missing_needs:
             continue
@@ -1850,34 +2537,245 @@ async def gap_plan_endpoint(request: GapPlanRequest) -> GapPlan:
 
 
 UNKNOWN_ANSWER_MARKERS = (
-    "不知道", "不记得", "忘了", "忘记", "不确定", "无法提供", "记不清",
+    "不知道", "不记得", "不清楚", "不了解", "忘了", "忘记", "不确定", "无法提供", "记不清",
 )
 NEGATIVE_ANSWER_MARKERS = (
     "没有", "没考", "未考", "没修过", "未修过", "没学过", "未学过", "没上过", "未上过",
     "未准备", "还没准备", "暂无", "暂时没有", "没有准备", "无",
 )
 
+EVIDENCE_ALIASES_BY_KEY = {
+    "ielts": ("ielts", "雅思"),
+    "toefl": ("toefl", "托福"),
+    "gre": ("gre",),
+    "gmat": ("gmat",),
+    "gpa": ("gpa",),
+    "average_score": ("average", "平均分", "均分"),
+    "portfolio": ("portfolio", "作品集"),
+    "recommendations": ("recommend", "reference", "推荐信", "推荐人"),
+    "statement_of_purpose": ("statement of purpose", "personal statement", "sop", "个人陈述", "动机信"),
+    "personal_statement": ("statement of purpose", "personal statement", "ps", "个人陈述", "动机信"),
+    "cv": ("cv", "résumé", "resume", "简历"),
+    "transcript": ("transcript", "成绩单"),
+    "degree_certificate": ("degree certificate", "diploma", "学位证", "学历证明", "毕业证"),
+}
 
-def evidence_answer_clause(answer: str, key: str) -> str:
-    aliases_by_key = {
-        "ielts": ("ielts", "雅思"),
-        "toefl": ("toefl", "托福"),
-        "gre": ("gre",),
-        "gmat": ("gmat",),
-        "gpa": ("gpa",),
-        "average_score": ("average", "平均分", "均分"),
-        "portfolio": ("portfolio", "作品集"),
-        "recommendations": ("recommend", "推荐信", "推荐人"),
-        "statement_of_purpose": ("statement of purpose", "personal statement", "sop", "个人陈述", "动机信"),
-        "cv": ("cv", "简历"),
-        "transcript": ("transcript", "成绩单"),
-        "degree_certificate": ("degree certificate", "diploma", "学位证", "学历证明", "毕业证"),
-    }
-    lowered = answer.casefold()
-    aliases = next(
-        (values for marker, values in aliases_by_key.items() if marker in key.casefold()),
+
+def evidence_aliases(key: str) -> tuple[str, ...]:
+    return next(
+        (
+            aliases
+            for marker, aliases in EVIDENCE_ALIASES_BY_KEY.items()
+            if marker in key.casefold()
+        ),
         (),
     )
+
+
+def answer_mentions_evidence_key(answer: str, key: str) -> bool:
+    lowered = answer.casefold()
+    return any(alias.casefold() in lowered for alias in evidence_aliases(key))
+
+
+def parse_expected_education_values(
+    answer: str,
+    expected_keys: List[str],
+) -> Dict[str, str]:
+    expected = {key.casefold() for key in expected_keys}
+    university_key = "education.university"
+    major_key = "education.major"
+    if not expected.intersection({university_key, major_key}):
+        return {}
+    cleaned = answer.strip().strip("，,；;。")
+    values: Dict[str, str] = {}
+    university_match = re.match(
+        r"^(.+?(?:大学|学院|university|college))\s*[，,；;]?\s*(.*)$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if university_match:
+        if university_key in expected:
+            values[university_key] = university_match.group(1).strip()
+        remainder = university_match.group(2).strip()
+        if major_key in expected and remainder:
+            values[major_key] = remainder
+        return values
+
+    parts = [part for part in re.split(r"\s+|[，,；;]", cleaned) if part]
+    if university_key in expected and major_key in expected and len(parts) >= 2:
+        values[university_key] = parts[0]
+        values[major_key] = " ".join(parts[1:])
+    elif university_key in expected and (
+        "大学" in cleaned or "学院" in cleaned or "university" in cleaned.casefold()
+    ):
+        values[university_key] = cleaned
+    elif major_key in expected and (
+        "专业" in cleaned or "major" in cleaned.casefold()
+    ):
+        values[major_key] = cleaned
+    return values
+
+
+COURSE_SLOT_GENERIC_TERMS = {
+    "course",
+    "courses",
+    "class",
+    "classes",
+    "module",
+    "modules",
+    "subject",
+    "subjects",
+    "math",
+    "mathematics",
+}
+COURSE_AGGREGATE_MARKERS = (
+    "credit",
+    "credits",
+    "ects",
+    "credit hour",
+    "credit hours",
+    "学分",
+    "总学时",
+)
+
+
+def course_slot_terms(need: GapEvidenceNeed) -> List[str]:
+    key_leaf = need.key.casefold().rsplit(".", 1)[-1]
+    key_parts = [
+        part
+        for part in re.split(r"[_\-\s]+", key_leaf)
+        if len(part) >= 3 and part not in COURSE_SLOT_GENERIC_TERMS
+    ]
+    label_parts = [
+        part.casefold()
+        for part in re.findall(r"[A-Za-z][A-Za-z0-9-]*|[\u4e00-\u9fff]+", need.label)
+        if len(part) >= 2 and part.casefold() not in COURSE_SLOT_GENERIC_TERMS
+    ]
+    phrases = [" ".join(key_parts), need.label.strip().casefold()]
+    return list(
+        dict.fromkeys(
+            term
+            for term in [*phrases, *key_parts, *label_parts]
+            if term and term not in COURSE_SLOT_GENERIC_TERMS
+        )
+    )
+
+
+def text_term_span(text: str, term: str) -> Optional[tuple[int, int]]:
+    pattern = (
+        rf"\b{re.escape(term)}\b"
+        if re.fullmatch(r"[a-z0-9 -]+", term, re.IGNORECASE)
+        else re.escape(term)
+    )
+    match = re.search(pattern, text, re.IGNORECASE)
+    return match.span() if match else None
+
+
+def answer_clause_around_span(answer: str, span: tuple[int, int]) -> str:
+    start, end = span
+    left = max(
+        [answer.rfind(separator, 0, start) for separator in ("，", ",", "、", "；", ";", "。", "\n")]
+        + [-1]
+    ) + 1
+    right_positions = [
+        answer.find(separator, end)
+        for separator in ("，", ",", "、", "；", ";", "。", "\n")
+        if answer.find(separator, end) >= 0
+    ]
+    right = min(right_positions) if right_positions else len(answer)
+    return answer[left:right].strip()
+
+
+def course_slot_is_aggregate(need: GapEvidenceNeed) -> bool:
+    descriptor = f"{need.key} {need.label}".casefold().replace("_", " ")
+    return any(marker in descriptor for marker in COURSE_AGGREGATE_MARKERS)
+
+
+def parse_expected_course_slot(
+    need: GapEvidenceNeed,
+    answer: str,
+) -> Optional[tuple[EvidenceAvailability, Any]]:
+    if need.evidence_type != "courses" and not need.key.casefold().startswith("courses."):
+        return None
+
+    stripped = answer.strip()
+    lowered = stripped.casefold()
+    key_leaf = need.key.casefold().rsplit(".", 1)[-1]
+    aggregate = course_slot_is_aggregate(need)
+    if aggregate:
+        quantity_match = re.search(
+            r"\d+(?:\.\d+)?\s*(?:ects|credits?|credit\s*hours?|学分|学时)",
+            lowered,
+            re.IGNORECASE,
+        )
+        aggregate_span = next(
+            (
+                span
+                for marker in COURSE_AGGREGATE_MARKERS
+                if (span := text_term_span(lowered, marker)) is not None
+            ),
+            None,
+        )
+        if quantity_match:
+            return "known", {"description": quantity_match.group(0)}
+        if aggregate_span:
+            clause = answer_clause_around_span(stripped, aggregate_span).casefold()
+            if any(marker in clause for marker in UNKNOWN_ANSWER_MARKERS):
+                return "unknown", None
+            if any(marker in clause for marker in NEGATIVE_ANSWER_MARKERS):
+                return "known_negative", None
+        return None
+
+    if key_leaf in {"course", "courses"}:
+        if any(marker in lowered for marker in UNKNOWN_ANSWER_MARKERS):
+            return "unknown", None
+        if any(marker in lowered for marker in NEGATIVE_ANSWER_MARKERS):
+            return "known_negative", None
+        return "known", {"description": stripped}
+
+    matched_span = next(
+        (
+            span
+            for term in course_slot_terms(need)
+            if (span := text_term_span(lowered, term)) is not None
+        ),
+        None,
+    )
+    if matched_span is None:
+        return None
+    clause = answer_clause_around_span(stripped, matched_span).casefold()
+    if any(marker in clause for marker in UNKNOWN_ANSWER_MARKERS):
+        return "unknown", None
+    if any(marker in clause for marker in NEGATIVE_ANSWER_MARKERS):
+        return "known_negative", None
+    return "known", {"description": answer[matched_span[0] : matched_span[1]]}
+
+
+def compound_material_availability(answer: str, key: str) -> Optional[EvidenceAvailability]:
+    if "materials." not in key.casefold():
+        return None
+    lowered = answer.casefold()
+    excluded_match = re.search(
+        r"除了(.+?)(?:以外|之外)?(?:都|其余).*(?:有|齐|准备)",
+        lowered,
+    ) or re.search(r"everything\s+except\s+(.+)", lowered)
+    if excluded_match:
+        excluded = excluded_match.group(1)
+        return (
+            "known_negative"
+            if any(alias.casefold() in excluded for alias in evidence_aliases(key))
+            else "known"
+        )
+    if re.search(r"^(?:这些|材料)?(?:我)?(?:都|全部)(?:有|齐了|准备好了)", lowered):
+        return "known"
+    if re.search(r"^(?:这些|材料)?(?:我)?(?:都|全部)(?:没有|没准备)", lowered):
+        return "known_negative"
+    return None
+
+
+def evidence_answer_clause(answer: str, key: str) -> str:
+    lowered = answer.casefold()
+    aliases = evidence_aliases(key)
     positions = [lowered.find(alias.casefold()) for alias in aliases]
     positions = [position for position in positions if position >= 0]
     if not positions:
@@ -1898,11 +2796,12 @@ def evidence_answer_clause(answer: str, key: str) -> str:
 
 def parse_evidence_value(key: str, answer: str) -> Any:
     lowered_key = key.casefold()
+    key_leaf = lowered_key.rsplit(".", 1)[-1]
     if lowered_key == "gpa" and not re.search(r"\bgpa\b", answer, re.IGNORECASE):
         if re.search(r"平均分|均分|average", answer, re.IGNORECASE):
             return None
     score_keys = ("gpa", "average_score", "ielts", "toefl", "gre", "gmat")
-    if any(marker in lowered_key for marker in score_keys):
+    if key_leaf in score_keys:
         numbers = [float(value) for value in re.findall(r"\d+(?:\.\d+)?", answer)]
         if not numbers:
             return None
@@ -1934,8 +2833,13 @@ def parse_evidence_value(key: str, answer: str) -> Any:
             answer,
             re.IGNORECASE,
         )
+        score = (
+            float(overall_match.group(1))
+            if overall_match
+            else None if subscores else numbers[0]
+        )
         return {
-            "score": float(overall_match.group(1)) if overall_match else numbers[0],
+            "score": score,
             "scale": float(scale_match.group(1)) if scale_match else None,
             "subscores": subscores,
         }
@@ -1954,28 +2858,208 @@ def parse_evidence_value(key: str, answer: str) -> Any:
     return {"description": answer}
 
 
+def merge_evidence_value(existing: Any, incoming: Any) -> Any:
+    if not isinstance(existing, dict) or not isinstance(incoming, dict):
+        return incoming
+    merged = {**existing}
+    for key, value in incoming.items():
+        if key == "subscores" and isinstance(value, dict):
+            merged[key] = {**merged.get(key, {}), **value}
+        elif value is not None:
+            merged[key] = value
+    return merged
+
+
+def missing_evidence_fields(need: GapEvidenceNeed, value: Any) -> List[str]:
+    required_fields = need.required_fields or required_fields_for_evidence_need(
+        need,
+        GapDeterministicConstraint(),
+    )
+    if not isinstance(value, dict):
+        if required_fields == ["description"] and value not in (None, "", []):
+            return []
+        return required_fields
+    missing = []
+    for field in required_fields:
+        if field in {"listening", "reading", "writing", "speaking"}:
+            present = value.get("subscores", {}).get(field) is not None
+        elif field == "status":
+            present = True
+        else:
+            present = value.get(field) is not None
+        if not present:
+            missing.append(field)
+    return missing
+
+
+def evidence_slot_label(slot: str) -> str:
+    key, field = slot.rsplit(".", 1)
+    evidence_labels = {
+        "education.university": "本科院校",
+        "education.major": "本科专业",
+    }
+    if key in evidence_labels:
+        return evidence_labels[key]
+    field_labels = {
+        "score": "总分",
+        "listening": "听力",
+        "reading": "阅读",
+        "writing": "写作",
+        "speaking": "口语",
+        "quantity": "数量",
+        "duration": "时长",
+        "description": "具体信息",
+        "status": "准备状态",
+    }
+    return f"{key} 的{field_labels.get(field, field)}"
+
+
+def evidence_satisfies_need(need: GapEvidenceNeed, item: UserEvidence) -> bool:
+    if item.availability != "known":
+        return False
+    if missing_evidence_fields(need, item.value):
+        return False
+    if need.minimum is not None:
+        if not isinstance(item.value, dict) or item.value.get("score") is None:
+            return False
+        if float(item.value["score"]) < need.minimum:
+            return False
+    if need.component_minimum is not None:
+        subscores = item.value.get("subscores", {}) if isinstance(item.value, dict) else {}
+        if any(
+            subscores.get(component) is None
+            or float(subscores[component]) < need.component_minimum
+            for component in ("listening", "reading", "writing", "speaking")
+        ):
+            return False
+    if need.required_quantity is not None:
+        if not isinstance(item.value, dict) or item.value.get("quantity") is None:
+            return False
+        if float(item.value["quantity"]) < need.required_quantity:
+            return False
+    return True
+
+
+def evidence_is_terminal_for_need(
+    need: GapEvidenceNeed,
+    item: UserEvidence,
+) -> bool:
+    if item.availability in {"known_negative", "unknown"}:
+        return True
+    return item.availability == "known" and not missing_evidence_fields(need, item.value)
+
+
 def parse_gap_evidence(request: GapEvidenceParseRequest) -> GapEvidenceParseResponse:
     now = datetime.now(timezone.utc).isoformat()
     evidence = []
+    missing_slots = []
     need_by_key = {need.key.casefold(): need for need in request.evidence_needs}
+    existing_by_key = {
+        item.key.casefold(): item for item in request.existing_evidence
+    }
+    multiple_keys = len(request.question.evidence_keys) > 1
+    stripped_answer = request.answer.strip().casefold()
+    globally_unknown = bool(
+        re.fullmatch(r"(?:我)?(?:都|全部)?(?:不知道|不记得|不清楚|不了解|不确定|记不清|无法提供)[。.!！]?", stripped_answer)
+    )
+    globally_negative = bool(
+        re.fullmatch(r"(?:我)?(?:都|全部)?(?:无|没有|暂时没有|暂无|没考|未考)[。.!！]?", stripped_answer)
+    )
+    education_values = parse_expected_education_values(
+        request.answer,
+        request.question.evidence_keys,
+    )
     for key in request.question.evidence_keys:
         need = need_by_key.get(key.casefold())
         if need is None:
             continue
+        required_fields = need.required_fields or required_fields_for_evidence_need(
+            need,
+            GapDeterministicConstraint(),
+        )
+        education_value = education_values.get(need.key.casefold())
+        if need.key.casefold() in {"education.university", "education.major"}:
+            if globally_unknown:
+                availability: EvidenceAvailability = "unknown"
+                value = None
+            elif globally_negative:
+                availability = "known_negative"
+                value = None
+            elif education_value:
+                availability = "known"
+                value = education_value
+            else:
+                missing_slots.extend(f"{need.key}.{field}" for field in required_fields)
+                continue
+            evidence.append(
+                UserEvidence(
+                    evidence_type=need.evidence_type,
+                    key=need.key,
+                    value=value,
+                    raw_answer=request.answer,
+                    availability=availability,
+                    updated_at=now,
+                )
+            )
+            continue
+        if need.evidence_type == "courses" or need.key.casefold().startswith("courses."):
+            if globally_unknown:
+                course_result: Optional[tuple[EvidenceAvailability, Any]] = (
+                    "unknown",
+                    None,
+                )
+            elif globally_negative:
+                course_result = ("known_negative", None)
+            else:
+                course_result = parse_expected_course_slot(need, request.answer)
+            if course_result is None:
+                missing_slots.extend(f"{need.key}.{field}" for field in required_fields)
+                continue
+            availability, value = course_result
+            evidence.append(
+                UserEvidence(
+                    evidence_type=need.evidence_type,
+                    key=need.key,
+                    value=value,
+                    raw_answer=request.answer,
+                    availability=availability,
+                    updated_at=now,
+                )
+            )
+            continue
+        compound_availability = compound_material_availability(request.answer, key)
+        if (
+            multiple_keys
+            and compound_availability is None
+            and not globally_unknown
+            and not globally_negative
+            and not answer_mentions_evidence_key(request.answer, key)
+        ):
+            missing_slots.extend(f"{need.key}.{field}" for field in required_fields)
+            continue
         clause = (
             request.answer
-            if len(request.question.evidence_keys) == 1
+            if not multiple_keys
             else evidence_answer_clause(request.answer, key)
         ).strip()
-        if any(marker in clause.casefold() for marker in UNKNOWN_ANSWER_MARKERS):
+        if compound_availability is not None:
+            availability = compound_availability
+        elif globally_unknown or any(marker in clause.casefold() for marker in UNKNOWN_ANSWER_MARKERS):
             availability: EvidenceAvailability = "unknown"
-        elif any(marker in clause.casefold() for marker in NEGATIVE_ANSWER_MARKERS) or clause.strip() == "0":
+        elif globally_negative or any(marker in clause.casefold() for marker in NEGATIVE_ANSWER_MARKERS) or clause.strip() == "0":
             availability = "known_negative"
         else:
             availability = "known"
         value = parse_evidence_value(key, clause) if availability == "known" else None
         if availability == "known" and value is None:
-            availability = "unknown"
+            missing_slots.extend(f"{need.key}.{field}" for field in required_fields)
+            continue
+        existing = existing_by_key.get(need.key.casefold())
+        if availability == "known" and existing and existing.availability == "known":
+            value = merge_evidence_value(existing.value, value)
+        if availability == "known":
+            missing_fields = missing_evidence_fields(need, value)
+            missing_slots.extend(f"{need.key}.{field}" for field in missing_fields)
         evidence.append(
             UserEvidence(
                 evidence_type=need.evidence_type,
@@ -1986,7 +3070,71 @@ def parse_gap_evidence(request: GapEvidenceParseRequest) -> GapEvidenceParseResp
                 updated_at=now,
             )
         )
-    return GapEvidenceParseResponse(evidence=evidence)
+    combined_evidence = {**existing_by_key}
+    combined_evidence.update({item.key.casefold(): item for item in evidence})
+    any_groups: Dict[str, List[GapEvidenceNeed]] = {}
+    for need in request.evidence_needs:
+        if need.evidence_group and need.group_relation == "any":
+            any_groups.setdefault(need.evidence_group, []).append(need)
+    satisfied_groups = [
+        group
+        for group, needs in any_groups.items()
+        if any(
+            evidence_satisfies_need(need, combined_evidence[need.key.casefold()])
+            for need in needs
+            if need.key.casefold() in combined_evidence
+        )
+    ]
+    if satisfied_groups:
+        group_by_key = {
+            need.key.casefold(): need.evidence_group
+            for need in request.evidence_needs
+        }
+        missing_slots = [
+            slot
+            for slot in missing_slots
+            if group_by_key.get(
+                next(
+                    (
+                        need.key.casefold()
+                        for need in request.evidence_needs
+                        if slot.startswith(f"{need.key}.")
+                    ),
+                    "",
+                )
+            )
+            not in satisfied_groups
+        ]
+    unique_missing_slots = list(dict.fromkeys(missing_slots))
+    evidence_by_key = {item.key.casefold(): item for item in evidence}
+    slot_states: Dict[str, EvidenceSlotStatus] = {
+        slot: "missing" for slot in unique_missing_slots
+    }
+    for need in request.evidence_needs:
+        item = evidence_by_key.get(need.key.casefold())
+        if item is None:
+            continue
+        required_fields = need.required_fields or required_fields_for_evidence_need(
+            need,
+            GapDeterministicConstraint(),
+        )
+        for field in required_fields:
+            slot = f"{need.key}.{field}"
+            if slot not in slot_states:
+                slot_states[slot] = item.availability
+    follow_up = (
+        f"还需要补充：{'、'.join(evidence_slot_label(slot) for slot in unique_missing_slots)}。"
+        "如果确实不知道或不记得，可以直接说明。"
+        if unique_missing_slots
+        else None
+    )
+    return GapEvidenceParseResponse(
+        evidence=evidence,
+        missing_slots=unique_missing_slots,
+        follow_up_question=follow_up,
+        satisfied_evidence_groups=satisfied_groups,
+        slot_states=slot_states,
+    )
 
 
 @app.post("/gap/evidence/parse", response_model=GapEvidenceParseResponse, tags=["gap"])
@@ -2189,8 +3337,14 @@ async def analyze_gap(request: GapAnalysisRequest) -> GapAnalysisResponse:
     semantic_tasks = []
     deterministic_results: Dict[str, tuple[GapStatus, str, str, str]] = {}
     informational = []
+    temporally_blocked_ids = set()
     for planned in request.plan.requirements:
         if not planned.matchable:
+            if not requirement_is_temporally_matchable(
+                planned.temporal_applicability
+            ):
+                temporally_blocked_ids.add(planned.requirement_id)
+                continue
             informational.append(planned)
             continue
         relevant_evidence = [
@@ -2222,6 +3376,33 @@ async def analyze_gap(request: GapAnalysisRequest) -> GapAnalysisResponse:
     semantic_results = await batch_semantic_gap_matching(semantic_tasks)
     results = []
     for planned in request.plan.requirements:
+        if planned.requirement_id in temporally_blocked_ids:
+            gap, reason = temporal_gap_explanation(
+                planned.temporal_applicability,
+                planned.source_cycle,
+                planned.temporal_note,
+            )
+            results.append(
+                GapResult(
+                    requirement_id=planned.requirement_id,
+                    category=planned.category,
+                    requirement=planned.requirement,
+                    requirement_zh=planned.requirement_zh,
+                    requirement_verification_status=(
+                        planned.requirement_verification_status
+                    ),
+                    importance=planned.importance,
+                    status="unknown",
+                    user_evidence="未执行硬性匹配",
+                    gap=gap,
+                    reason=reason,
+                    source_url=planned.source_url,
+                    source_cycle=planned.source_cycle,
+                    temporal_applicability=planned.temporal_applicability,
+                    temporal_note=planned.temporal_note,
+                )
+            )
+            continue
         if not planned.matchable:
             continue
         deterministic = deterministic_results.get(planned.requirement_id)
@@ -2282,11 +3463,15 @@ async def analyze_gap(request: GapAnalysisRequest) -> GapAnalysisResponse:
                 requirement=planned.requirement,
                 requirement_zh=planned.requirement_zh,
                 requirement_verification_status=planned.requirement_verification_status,
+                importance=planned.importance,
                 status=status,
                 user_evidence=user_text,
                 gap=gap,
                 reason=reason,
                 source_url=planned.source_url,
+                source_cycle=planned.source_cycle,
+                temporal_applicability=planned.temporal_applicability,
+                temporal_note=planned.temporal_note,
             )
         )
     return GapAnalysisResponse(
@@ -2301,6 +3486,311 @@ async def analyze_gap(request: GapAnalysisRequest) -> GapAnalysisResponse:
 async def gap_analyze_endpoint(request: GapAnalysisRequest) -> GapAnalysisResponse:
     """Run deterministic checks plus at most one batched semantic LLM request."""
     return await analyze_gap(request)
+
+
+def precise_calendar_date(value: str) -> Optional[date]:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value.strip()):
+        return None
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        return None
+
+
+def planning_deadline(
+    timeline: ApplicationTimeline,
+) -> tuple[Optional[str], Optional[str], Optional[date]]:
+    if timeline.status == "not_found" or not timeline.application_deadlines:
+        return None, None, None
+    precise = [
+        (precise_calendar_date(item.date), item)
+        for item in timeline.application_deadlines
+    ]
+    precise = [(parsed, item) for parsed, item in precise if parsed is not None]
+    if precise:
+        final_dates = [
+            pair
+            for pair in precise
+            if "final" in pair[1].type.casefold()
+            or "final" in pair[1].label.casefold()
+            or "最终" in pair[1].label
+        ]
+        parsed, selected = max(final_dates or precise, key=lambda pair: pair[0])
+        return selected.date, selected.label, parsed
+    selected = next(
+        (
+            item
+            for item in reversed(timeline.application_deadlines)
+            if "final" in item.type.casefold()
+            or "final" in item.label.casefold()
+            or "最终" in item.label
+        ),
+        timeline.application_deadlines[-1],
+    )
+    return selected.date, selected.label, None
+
+
+def planning_ready_by(deadline: date, today: date) -> date:
+    days_remaining = (deadline - today).days
+    if days_remaining >= 60:
+        buffer_days = 21
+    elif days_remaining >= 30:
+        buffer_days = 14
+    elif days_remaining >= 14:
+        buffer_days = 7
+    elif days_remaining >= 3:
+        buffer_days = 2
+    else:
+        buffer_days = 1
+    return deadline - timedelta(days=buffer_days)
+
+
+def conditional_requirement_unconfirmed(gap: GapResult) -> bool:
+    if gap.status != "unknown":
+        return False
+    text = f"{gap.requirement} {gap.requirement_zh or ''}".casefold()
+    return bool(
+        re.search(
+            r"\bif\b|where applicable|when required|depending on|may be required|"
+            r"如适用|如果|若|视情况|可能要求|可能需要",
+            text,
+        )
+    )
+
+
+def hard_requirement(gap: GapResult) -> bool:
+    if gap.importance == "required":
+        return True
+    if gap.importance in {"recommended", "preferred"}:
+        return False
+    text = f"{gap.requirement} {gap.requirement_zh or ''}".casefold()
+    return bool(
+        re.search(
+            r"\brequired\b|\bmust\b|\bmandatory\b|\bshall\b|必须|须|硬性要求",
+            text,
+        )
+    )
+
+
+def select_planning_gaps(gaps: List[GapResult]) -> List[Dict[str, Any]]:
+    selected = []
+    action_by_status: Dict[GapStatus, PlanningActionKind] = {
+        "partial": "complete_gap",
+        "not_met": "resolve_gap",
+        "unknown": "confirm_information",
+        "met": "confirm_information",
+    }
+    for gap in gaps:
+        if gap.status == "met":
+            continue
+        optional = gap.importance in {"recommended", "preferred"}
+        hard = hard_requirement(gap)
+        conditional_confirmation_only = conditional_requirement_unconfirmed(gap)
+        action_kind: PlanningActionKind = (
+            "confirm_information"
+            if conditional_confirmation_only
+            else action_by_status[gap.status]
+        )
+        selected.append(
+            {
+                **gap.model_dump(),
+                "selected_action_kind": action_kind,
+                "conditional_confirmation_only": conditional_confirmation_only,
+                "plan_track": "optional" if optional else "main",
+                "priority": "optional" if optional else ("high" if hard else "medium"),
+                "requirement_type": "required" if hard else gap.importance,
+            }
+        )
+    return selected
+
+
+def validate_action_plan(
+    draft: DeepSeekActionPlanOutput,
+    all_gaps: List[GapResult],
+    selected_gaps: List[Dict[str, Any]],
+    precise_deadline: Optional[date],
+) -> List[PlanningAction]:
+    all_by_id = {gap.requirement_id: gap for gap in all_gaps}
+    selected_by_id = {gap["requirement_id"]: gap for gap in selected_gaps}
+    action_ids = [action.action_id for action in draft.actions]
+    if len(action_ids) != len(set(action_ids)):
+        raise HTTPException(status_code=502, detail="DeepSeek Action Plan contains duplicate action_id values")
+
+    for action in draft.actions:
+        source = all_by_id.get(action.source_gap_id)
+        selected = selected_by_id.get(action.source_gap_id)
+        if source is None or selected is None:
+            raise HTTPException(status_code=502, detail=f"Action references unknown Gap: {action.source_gap_id}")
+        if source.status == "met":
+            raise HTTPException(status_code=502, detail=f"Action must not be generated for met Gap: {action.source_gap_id}")
+        if action.action_kind != selected["selected_action_kind"]:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Action kind violates code selector for Gap: {action.source_gap_id}",
+            )
+        if selected["conditional_confirmation_only"] and action.action_kind != "confirm_information":
+            raise HTTPException(
+                status_code=502,
+                detail=f"Conditional Gap requires confirmation first: {action.source_gap_id}",
+            )
+        if action.target_date:
+            target = precise_calendar_date(action.target_date)
+            if target is None:
+                raise HTTPException(status_code=502, detail=f"Action target_date is not ISO date: {action.action_id}")
+            if precise_deadline is None:
+                raise HTTPException(status_code=502, detail=f"Action invented a precise date without a precise Deadline: {action.action_id}")
+            if target > precise_deadline:
+                raise HTTPException(status_code=502, detail=f"Action target_date exceeds Application Deadline: {action.action_id}")
+        if precise_deadline is None and re.search(r"\b\d{4}-\d{2}-\d{2}\b", action.time_period):
+            raise HTTPException(status_code=502, detail=f"Action time_period invented a precise date: {action.action_id}")
+        if any(dependency not in action_ids for dependency in action.depends_on):
+            raise HTTPException(status_code=502, detail=f"Action has an unknown dependency: {action.action_id}")
+
+    required_gap_ids = {
+        gap["requirement_id"]
+        for gap in selected_gaps
+        if gap["requirement_type"] == "required" and gap["plan_track"] == "main"
+    }
+    covered_gap_ids = {action.source_gap_id for action in draft.actions}
+    missing_required = sorted(required_gap_ids - covered_gap_ids)
+    if missing_required:
+        raise HTTPException(
+            status_code=502,
+            detail=f"DeepSeek Action Plan omitted required Gaps: {', '.join(missing_required)}",
+        )
+
+    actions = [
+        PlanningAction(
+            **action.model_dump(),
+            priority=selected_by_id[action.source_gap_id]["priority"],
+            requirement_type=selected_by_id[action.source_gap_id]["requirement_type"],
+            plan_track=selected_by_id[action.source_gap_id]["plan_track"],
+        )
+        for action in draft.actions
+    ]
+    track_by_action_id = {action.action_id: action.plan_track for action in actions}
+    for action in actions:
+        if action.plan_track == "main" and any(
+            track_by_action_id[dependency] == "optional"
+            for dependency in action.depends_on
+        ):
+            raise HTTPException(
+                status_code=502,
+                detail=f"Main-plan action depends on an optional action: {action.action_id}",
+            )
+    return actions
+
+
+def apply_selected_action_kinds(
+    content: DeepSeekActionPlanContent,
+    selected_gaps: List[Dict[str, Any]],
+) -> DeepSeekActionPlanOutput:
+    selected_by_id = {gap["requirement_id"]: gap for gap in selected_gaps}
+    actions: List[PlanningActionDraft] = []
+    for action in content.actions:
+        selected = selected_by_id.get(action.source_gap_id)
+        if selected is None:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Action references unknown Gap: {action.source_gap_id}",
+            )
+        actions.append(
+            PlanningActionDraft(
+                **action.model_dump(),
+                action_kind=selected["selected_action_kind"],
+            )
+        )
+    return DeepSeekActionPlanOutput(actions=actions)
+
+
+async def build_action_plan(
+    request: ActionPlanRequest,
+    *,
+    current_date: Optional[date] = None,
+) -> ActionPlan:
+    today = current_date or date.today()
+    deadline_text, deadline_label, exact_deadline = planning_deadline(
+        request.application_timeline
+    )
+    ready_by = planning_ready_by(exact_deadline, today) if exact_deadline else None
+    selected_gaps = select_planning_gaps(request.gap_analysis.results)
+    common = {
+        "target_program": request.target_program,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "current_date": today.isoformat(),
+        "timeline_status": request.application_timeline.status,
+        "application_deadline": deadline_text,
+        "application_deadline_label": deadline_label,
+        "deadline_is_precise": exact_deadline is not None,
+        "ready_by_date": ready_by.isoformat() if ready_by else None,
+    }
+    if not selected_gaps:
+        return ActionPlan(**common, actions=[], planning_llm_requests=0)
+
+    date_rule = (
+        f"The official hard Application Deadline is {deadline_text}. The internal ready-by "
+        f"date is {ready_by.isoformat() if ready_by else 'not available'}; schedule core "
+        "materials to be substantially complete by ready-by and never date an action after "
+        "the Deadline."
+        if exact_deadline
+        else (
+            f"The official Deadline is only the non-precise text {deadline_text!r}. Do not "
+            "invent a calendar date; use time phases and set every target_date to null."
+            if deadline_text
+            else "No official Deadline was found. Use sequence/stage labels only, set every target_date to null, and do not invent dates."
+        )
+    )
+    prompt = (
+        "You are an application-level milestone planner. Convert only the code-selected Gaps "
+        "below into concrete actions. Do not retrieve or reinterpret Requirements and do not "
+        "change Gap status. Code has already determined selected_action_kind for each Gap. "
+        "Do not output, choose, or change action_kind. Use selected_action_kind only to align "
+        "the action content: complete_gap fills a partial Gap, resolve_gap solves a not_met "
+        "Gap, and confirm_information confirms an unknown or conditional Gap. For a conditional Gap "
+        "marked conditional_confirmation_only, create only a low-cost confirmation action; "
+        "never create remediation before applicability is confirmed.\n\n"
+        "Use application-level milestones, not daily checklists. Split only genuinely long "
+        "work into a few meaningful milestones. For language, normally use preparation, first "
+        "test, retake buffer, and final score. For essays, use materials, first draft, feedback, "
+        "and final. For recommendations, use recommender confirmation, materials, and submission "
+        "follow-up. Keep simple tasks simple. Determine dependencies, parallel work, and sensible "
+        "time phases. Main actions must never depend on optional actions. Return at least one "
+        "action for every required selected Gap. Recommended/preferred items are optional "
+        "enhancements and must not block the main plan.\n\n"
+        f"Current date: {today.isoformat()}. {date_rule}\n\n"
+        f"Timeline: {request.application_timeline.model_dump_json()}\n"
+        f"Code-selected Gaps: {json.dumps(selected_gaps, ensure_ascii=False)}\n"
+        f"Output JSON Schema: {json.dumps(DeepSeekActionPlanContent.model_json_schema(), ensure_ascii=False)}\n"
+        "Return only the complete JSON object."
+    )
+    content = await call_deepseek(
+        messages=[
+            {"role": "system", "content": "Return only a structured application Action Plan without tools."},
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=5000,
+        response_format={"type": "json_object"},
+    )
+    try:
+        model_content = DeepSeekActionPlanContent.model_validate_json(content)
+    except ValidationError as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"DeepSeek returned an invalid Action Plan: {error}",
+        ) from error
+    draft = apply_selected_action_kinds(model_content, selected_gaps)
+    actions = validate_action_plan(
+        draft,
+        request.gap_analysis.results,
+        selected_gaps,
+        exact_deadline,
+    )
+    return ActionPlan(**common, actions=actions)
+
+
+@app.post("/planning/plan", response_model=ActionPlan, tags=["planning"])
+async def action_plan_endpoint(request: ActionPlanRequest) -> ActionPlan:
+    return await build_action_plan(request)
 
 
 @app.post("/user-profile", response_model=UserProfile, tags=["profile"])

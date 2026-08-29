@@ -28,6 +28,7 @@ from app.main import (  # noqa: E402
     build_gap_plan,
     parse_gap_evidence,
 )
+from report_output import print_json_report  # noqa: E402
 
 
 def requirement(
@@ -44,6 +45,7 @@ def requirement(
         source_type="official_retrieval" if status == "official_verified" else "model_memory",
         verification_status=status,
         source_url="https://example.edu/programme" if status == "official_verified" else None,
+        temporal_applicability="undated" if status == "official_verified" else "unknown",
     )
 
 
@@ -212,10 +214,8 @@ async def main() -> None:
             ],
             "我有 IELTS 7.0，但不记得小分。",
         ))
-    print(json.dumps(reports, ensure_ascii=False, indent=2))
+    print_json_report(reports)
 
 
 if __name__ == "__main__":
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
     asyncio.run(main())

@@ -22,7 +22,7 @@ type ExploreTarget = {
   mode: "explore";
   countries: string[];
   target_major: string;
-  ranking: { type: string; basis: "overall" | "subject"; min: number | null; max: number | null };
+  ranking: { type: "QS"; basis: "overall" | "subject"; min: number | null; max: number | null };
   ranking_subject: string | null;
   additional_preferences: string;
 };
@@ -59,6 +59,7 @@ type ApplicationTimeline = {
 };
 type RequirementCategory = "academic" | "course" | "language" | "standardized_test" | "experience" | "materials" | "other";
 type RequirementCoverage = "official_verified" | "model_memory_unverified" | "user_supplied" | "not_found";
+type RequirementTemporalApplicability = "target_cycle_confirmed" | "undated" | "previous_cycle" | "not_yet_published" | "unknown";
 type RequirementItem = {
   category: RequirementCategory;
   requirement: string;
@@ -68,6 +69,9 @@ type RequirementItem = {
   source_type: "official_retrieval" | "model_memory" | "user_supplied";
   verification_status: "official_verified" | "model_memory_unverified" | "user_supplied";
   source_url: string | null;
+  source_cycle: string | null;
+  temporal_applicability: RequirementTemporalApplicability;
+  temporal_note: string | null;
 };
 type RequirementCategoryReview = { category: RequirementCategory; coverage: RequirementCoverage; requirements: RequirementItem[] };
 type TargetProgramRequirementsReview = { target_program: TargetProgram; checked_at: string; categories: RequirementCategoryReview[] };
@@ -75,7 +79,7 @@ type EvidenceAvailability = "known" | "known_negative" | "unknown";
 type GapStatus = "met" | "partial" | "not_met" | "unknown";
 type GapEvidenceType = "education_university" | "education_major" | "academic_score" | "language_score" | "standardized_score" | "courses" | "material_status" | "material_quantity" | "experience" | "generic";
 type UserEvidence = { evidence_type: GapEvidenceType; key: string; value: unknown; raw_answer: string; availability: EvidenceAvailability; updated_at: string; source_requirement_ids: string[] };
-type GapEvidenceNeed = { key: string; evidence_type: GapEvidenceType; label: string; already_known: boolean };
+type GapEvidenceNeed = { key: string; evidence_type: GapEvidenceType; label: string; already_known: boolean; required_fields: string[]; evidence_group: string | null; group_relation: "all" | "any"; minimum: number | null; component_minimum: number | null; required_quantity: number | null };
 type GapQuestion = { question_id: string; question: string; evidence_keys: string[] };
 type GapPlannedRequirement = {
   requirement_id: string;
@@ -85,6 +89,9 @@ type GapPlannedRequirement = {
   importance: RequirementItem["importance"];
   requirement_verification_status: "official_verified" | "model_memory_unverified" | "user_supplied";
   source_url: string | null;
+  source_cycle: string | null;
+  temporal_applicability: RequirementTemporalApplicability;
+  temporal_note: string | null;
   matchable: boolean;
   informational_reason: string;
   match_strategy: "deterministic" | "semantic" | "hybrid";
@@ -92,8 +99,35 @@ type GapPlannedRequirement = {
   constraint: { kind: string; options: unknown[] };
 };
 type GapPlan = { target_program: TargetProgram; requirements: GapPlannedRequirement[]; questions: GapQuestion[]; reusable_evidence: UserEvidence[]; planning_llm_requests: number };
-type GapResult = { requirement_id: string; category: RequirementCategory; requirement: string; requirement_zh?: string | null; requirement_verification_status: "official_verified" | "model_memory_unverified" | "user_supplied"; status: GapStatus; user_evidence: string; gap: string; reason: string; source_url: string | null };
+type GapResult = { requirement_id: string; category: RequirementCategory; requirement: string; requirement_zh?: string | null; requirement_verification_status: "official_verified" | "model_memory_unverified" | "user_supplied"; importance: RequirementItem["importance"]; status: GapStatus; user_evidence: string; gap: string; reason: string; source_url: string | null; source_cycle: string | null; temporal_applicability: RequirementTemporalApplicability; temporal_note: string | null };
 type GapAnalysisResponse = { target_program: TargetProgram; results: GapResult[]; informational_requirements: GapPlannedRequirement[]; semantic_llm_requests: number };
+type PlanningAction = {
+  action_id: string;
+  action: string;
+  action_kind: "complete_gap" | "resolve_gap" | "confirm_information";
+  time_period: string;
+  target_date: string | null;
+  priority: "high" | "medium" | "optional";
+  requirement_type: RequirementItem["importance"];
+  plan_track: "main" | "optional";
+  source_gap_id: string;
+  reason: string;
+  status: "pending" | "in_progress" | "completed" | "blocked";
+  depends_on: string[];
+  parallel_group: string | null;
+};
+type ActionPlan = {
+  target_program: TargetProgram;
+  generated_at: string;
+  current_date: string;
+  timeline_status: ApplicationTimeline["status"];
+  application_deadline: string | null;
+  application_deadline_label: string | null;
+  deadline_is_precise: boolean;
+  ready_by_date: string | null;
+  actions: PlanningAction[];
+  planning_llm_requests: number;
+};
 type OverallRanking = { edition: number; rank_display: string; rank_min: number; rank_max: number | null };
 type SubjectRanking = OverallRanking & { subject: string };
 type CandidateUniversity = {
@@ -116,7 +150,6 @@ type CandidateUniversity = {
 type SubjectMappingResponse = { target_major: string; candidates: string[] };
 
 const COUNTRY_OPTIONS = ["美国", "英国", "中国香港", "新加坡", "澳大利亚", "加拿大", "德国", "欧洲其他地区"];
-const RANKING_OPTIONS = ["QS", "THE", "U.S. News Best Global Universities", "U.S. News 美国国内大学排名"];
 const REQUIREMENT_CATEGORIES: { id: RequirementCategory; label: string }[] = [
   { id: "academic", label: "学术背景" },
   { id: "course", label: "先修课程" },
@@ -144,6 +177,13 @@ const SOURCE_LEVEL_LABELS: Record<RequirementItem["source_level"], string> = {
   university: "学校级",
   unknown: "信息层级未确认",
 };
+const TEMPORAL_APPLICABILITY_LABELS: Record<RequirementTemporalApplicability, string> = {
+  target_cycle_confirmed: "目标周期已确认",
+  undated: "官网未标周期",
+  previous_cycle: "上一周期参考",
+  not_yet_published: "目标周期尚未发布",
+  unknown: "周期适用性待确认",
+};
 
 const EMPTY_PROFILE: UserProfile = {
   education: { university: "", major: "", gpa: null, average_score: null, courses: [] },
@@ -157,6 +197,27 @@ const TARGET_CONFIRMATION_TIMEOUT_MS = 35_000;
 const REQUIREMENTS_RETRIEVAL_TIMEOUT_MS = 130_000;
 const TIMELINE_RETRIEVAL_TIMEOUT_MS = 130_000;
 const OVERALL_RANKING_EXPLANATION = "QS 综合排名与学科排名的覆盖范围不同。部分专业型院校可能未进入综合榜，但仍会出现在对应学科排名中。建议结合学科排名判断该校在目标领域的实力。";
+
+function groupPlanningActions(actions: PlanningAction[]) {
+  const groups = new Map<string, PlanningAction[]>();
+  actions.forEach((action) => {
+    const group = groups.get(action.time_period) ?? [];
+    group.push(action);
+    groups.set(action.time_period, group);
+  });
+  return Array.from(groups, ([timePeriod, items]) => ({
+    timePeriod,
+    items: [...items].sort((left, right) => Number(left.plan_track === "optional") - Number(right.plan_track === "optional")),
+  }));
+}
+
+function planningDisplayText(value: string, hasPreciseDeadline: boolean) {
+  if (hasPreciseDeadline) return value;
+  return value
+    .replace(/正式提交申请|提交申请|递交申请/g, "准备至可提交状态")
+    .replace(/submit(?: the)? application/gi, "prepare until ready for submission")
+    .replace(/application submission/gi, "ready for submission");
+}
 
 function OverallRankingValue({ university }: { university: CandidateUniversity }) {
   if (university.overall_ranking) return <>#{university.overall_ranking.rank_display}</>;
@@ -176,11 +237,10 @@ export default function Home() {
   const [showProfile, setShowProfile] = useState(false);
   const [profileStatus, setProfileStatus] = useState<ProfileStatus>("not_started");
   const [errorMessage, setErrorMessage] = useState("");
-  const [targetStep, setTargetStep] = useState<"explore" | "requirements" | "gap_interview" | "gap_results" | null>(null);
+  const [targetStep, setTargetStep] = useState<"explore" | "entry_cycle" | "requirements" | "gap_interview" | "gap_results" | "planning" | null>(null);
   const [target, setTarget] = useState<ExploreTarget | null>(null);
   const [countries, setCountries] = useState<string[]>([]);
   const [targetMajor, setTargetMajor] = useState("");
-  const [rankingType, setRankingType] = useState("QS");
   const [rankingBasis, setRankingBasis] = useState<"overall" | "subject">("overall");
   const [subjectCandidates, setSubjectCandidates] = useState<string[]>([]);
   const [selectedSubject, setSelectedSubject] = useState("");
@@ -197,6 +257,7 @@ export default function Home() {
   const [loadingUniversity, setLoadingUniversity] = useState<string | null>(null);
   const [isDiscovering, setIsDiscovering] = useState(false);
   const [discoveryError, setDiscoveryError] = useState("");
+  const [pendingTargetProgram, setPendingTargetProgram] = useState<TargetProgram | null>(null);
   const [activeTargetProgram, setActiveTargetProgram] = useState<TargetProgram | null>(null);
   const [isConfirmingTarget, setIsConfirmingTarget] = useState(false);
   const [confirmationError, setConfirmationError] = useState("");
@@ -216,6 +277,9 @@ export default function Home() {
   const [userEvidence, setUserEvidence] = useState<UserEvidence[]>([]);
   const [gapPlan, setGapPlan] = useState<GapPlan | null>(null);
   const [gapQuestionIndex, setGapQuestionIndex] = useState(0);
+  const [gapFollowUpQuestion, setGapFollowUpQuestion] = useState("");
+  const [gapFollowUpSlots, setGapFollowUpSlots] = useState<string[]>([]);
+  const [satisfiedEvidenceGroups, setSatisfiedEvidenceGroups] = useState<string[]>([]);
   const [gapTurns, setGapTurns] = useState<{ question: string; answer: string }[]>([]);
   const [gapInput, setGapInput] = useState("");
   const [isPlanningGap, setIsPlanningGap] = useState(false);
@@ -223,6 +287,9 @@ export default function Home() {
   const [isAnalyzingGap, setIsAnalyzingGap] = useState(false);
   const [gapError, setGapError] = useState("");
   const [gapAnalysis, setGapAnalysis] = useState<GapAnalysisResponse | null>(null);
+  const [actionPlan, setActionPlan] = useState<ActionPlan | null>(null);
+  const [isPlanningActions, setIsPlanningActions] = useState(false);
+  const [actionPlanError, setActionPlanError] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const discoveryRequestRef = useRef(0);
   const currentTopic = topics[topicIndex];
@@ -295,12 +362,34 @@ export default function Home() {
     setSupplementCategory(null);
     setGapPlan(null);
     setGapQuestionIndex(0);
+    setGapFollowUpQuestion("");
+    setGapFollowUpSlots([]);
+    setSatisfiedEvidenceGroups([]);
     setGapTurns([]);
     setGapInput("");
     setGapAnalysis(null);
     setGapError("");
+    setActionPlan(null);
+    setActionPlanError("");
     void retrieveRequirements(targetProgram);
     void retrieveTimeline(targetProgram);
+  }
+
+  function beginEntryCycleSelection(targetProgram: TargetProgram) {
+    setPendingTargetProgram(targetProgram);
+    setTargetStep("entry_cycle");
+  }
+
+  function confirmEntryCycle() {
+    if (!pendingTargetProgram) return;
+    const entryYear = Number(intendedEntryYear);
+    if (!entryYear) return;
+    setActiveTarget({
+      ...pendingTargetProgram,
+      intended_entry_year: entryYear,
+      intended_entry_term: intendedEntryTerm,
+    });
+    setPendingTargetProgram(null);
   }
 
   async function retrieveRequirements(targetProgram: TargetProgram) {
@@ -384,6 +473,9 @@ export default function Home() {
       source_type: "user_supplied",
       verification_status: "user_supplied",
       source_url: supplementSourceUrl.trim() || null,
+      source_cycle: null,
+      temporal_applicability: "undated",
+      temporal_note: null,
     };
     setRequirementsReview((current) => current ? {
       ...current,
@@ -437,6 +529,9 @@ export default function Home() {
     setGapAnalysis(null);
     setGapTurns([]);
     setGapQuestionIndex(0);
+    setGapFollowUpQuestion("");
+    setGapFollowUpSlots([]);
+    setSatisfiedEvidenceGroups([]);
     try {
       const response = await fetch(`${API_BASE_URL}/gap/plan`, {
         method: "POST",
@@ -461,31 +556,90 @@ export default function Home() {
     }
   }
 
+  async function generateActionPlan() {
+    if (!activeTargetProgram || !gapAnalysis || isPlanningActions) return;
+    setIsPlanningActions(true);
+    setActionPlanError("");
+    const timeline = applicationTimeline ?? {
+      admission_cycle: `${activeTargetProgram.intended_entry_term} ${activeTargetProgram.intended_entry_year}`,
+      application_open_date: null,
+      application_open_source_url: null,
+      application_deadlines: [],
+      rolling_admission: null,
+      rolling_admission_source_url: null,
+      status: "not_found" as const,
+    };
+    try {
+      const response = await fetch(`${API_BASE_URL}/planning/plan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target_program: activeTargetProgram,
+          gap_analysis: gapAnalysis,
+          application_timeline: timeline,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail ?? "暂时无法生成申请行动计划。");
+      setActionPlan(data as ActionPlan);
+      setTargetStep("planning");
+    } catch (error) {
+      setActionPlanError(error instanceof Error ? error.message : "暂时无法生成申请行动计划。");
+    } finally {
+      setIsPlanningActions(false);
+    }
+  }
+
   async function submitGapAnswer(value: string) {
     const answer = value.trim();
     const question = gapPlan?.questions[gapQuestionIndex];
     if (!answer || !question || !gapPlan || isParsingGapAnswer) return;
-    const needs = gapPlan.requirements
+    const allNeeds = gapPlan.requirements
       .flatMap((item) => item.evidence_needs)
-      .filter((need, index, all) => question.evidence_keys.includes(need.key) && all.findIndex((item) => item.key === need.key) === index);
+      .filter((need, index, all) => all.findIndex((item) => item.key === need.key) === index);
+    const activeEvidenceKeys = gapFollowUpSlots.length > 0
+      ? allNeeds.filter((need) => gapFollowUpSlots.some((slot) => slot.startsWith(`${need.key}.`))).map((need) => need.key)
+      : question.evidence_keys;
+    const needs = allNeeds.filter((need) => activeEvidenceKeys.includes(need.key));
     setIsParsingGapAnswer(true);
     setGapError("");
     try {
+      const displayedQuestion = gapFollowUpQuestion || question.question;
       const response = await fetch(`${API_BASE_URL}/gap/evidence/parse`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, evidence_needs: needs, answer }),
+        body: JSON.stringify({
+          question: { ...question, question: displayedQuestion, evidence_keys: activeEvidenceKeys },
+          evidence_needs: needs,
+          existing_evidence: userEvidence,
+          answer,
+        }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail ?? "暂时无法记录这条回答。");
-      const nextEvidence = mergeEvidence(userEvidence, (data as { evidence: UserEvidence[] }).evidence);
+      const parsed = data as { evidence: UserEvidence[]; missing_slots: string[]; follow_up_question: string | null; satisfied_evidence_groups: string[] };
+      const nextEvidence = mergeEvidence(userEvidence, parsed.evidence);
+      const nextSatisfiedGroups = Array.from(new Set([...satisfiedEvidenceGroups, ...parsed.satisfied_evidence_groups]));
       setUserEvidence(nextEvidence);
-      setGapTurns((current) => [...current, { question: question.question, answer }]);
+      setSatisfiedEvidenceGroups(nextSatisfiedGroups);
+      setGapTurns((current) => [...current, { question: displayedQuestion, answer }]);
       setGapInput("");
-      if (gapQuestionIndex === gapPlan.questions.length - 1) {
+      if (parsed.missing_slots.length > 0 && parsed.follow_up_question) {
+        setGapFollowUpQuestion(parsed.follow_up_question);
+        setGapFollowUpSlots(parsed.missing_slots);
+        return;
+      }
+      setGapFollowUpQuestion("");
+      setGapFollowUpSlots([]);
+      const evidenceByKey = new Map(nextEvidence.map((item) => [item.key.toLowerCase(), item]));
+      const nextQuestionIndex = gapPlan.questions.findIndex((candidate, index) => index > gapQuestionIndex && candidate.evidence_keys.some((key) => {
+        const need = allNeeds.find((item) => item.key === key);
+        return need && !evidenceByKey.has(key.toLowerCase()) && (!need.evidence_group || !nextSatisfiedGroups.includes(need.evidence_group));
+      }));
+      if (nextQuestionIndex < 0) {
         await analyzeGap(gapPlan, nextEvidence);
       } else {
-        setGapQuestionIndex((index) => index + 1);
+        setGapQuestionIndex(nextQuestionIndex);
       }
     } catch (error) {
       setGapError(error instanceof Error ? error.message : "暂时无法记录这条回答。");
@@ -515,8 +669,6 @@ export default function Home() {
           university: inputTarget.university.trim(),
           program: inputTarget.program?.trim() ?? "",
           official_program_url: inputTarget.official_program_url?.trim() ?? "",
-          intended_entry_year: Number(intendedEntryYear) || DEFAULT_ENTRY_YEAR,
-          intended_entry_term: intendedEntryTerm,
         }),
       });
       const data = await response.json();
@@ -541,7 +693,7 @@ export default function Home() {
     inputTarget: { university: string; program: string; official_program_url?: string },
   ) {
     const confirmed = await requestTargetProgramConfirmation(inputTarget);
-    if (confirmed) setActiveTarget(confirmed);
+    if (confirmed) beginEntryCycleSelection(confirmed);
   }
 
   async function verifyManualProgramUrl(university: string) {
@@ -553,11 +705,6 @@ export default function Home() {
   }
 
   const discoverUniversities = useCallback(async (scope: ExploreTarget) => {
-    if (scope.ranking.type !== "QS") {
-      setDiscoveryError("候选项目发现第一版仅支持 QS 排名，请返回修改榜单类型。");
-      return;
-    }
-
     const requestId = ++discoveryRequestRef.current;
     setIsDiscovering(true);
     setDiscoveryError("");
@@ -636,7 +783,7 @@ export default function Home() {
   }
 
   useEffect(() => {
-    if (targetStep !== "explore" || rankingType !== "QS") return;
+    if (targetStep !== "explore") return;
     const minimum = Number(rankingMin);
     const maximum = Number(rankingMax);
     if (!minimum || !maximum || minimum > maximum) return;
@@ -658,14 +805,14 @@ export default function Home() {
       void discoverUniversities(nextTarget);
     }, 180);
     return () => window.clearTimeout(timer);
-  }, [additionalPreferences, countries, discoverUniversities, rankingBasis, rankingMax, rankingMin, rankingType, selectedSubject, targetMajor, targetStep]);
+  }, [additionalPreferences, countries, discoverUniversities, rankingBasis, rankingMax, rankingMin, selectedSubject, targetMajor, targetStep]);
 
   if (showProfile && targetStep) {
     return (
       <main className={`${styles.page} ${styles.targetPage}`}>
-        <header className={styles.header}><div className={styles.brand}><span className={styles.brandMark}>知</span><span>知途留学</span></div><span className={styles.status}>{targetStep === "gap_results" ? "05 · Gap Table" : targetStep === "gap_interview" ? "04 · 补充匹配信息" : targetStep === "requirements" ? "03 · 申请要求分析" : "02 · 目标院校与申请范围"}</span></header>
+        <header className={styles.header}><div className={styles.brand}><span className={styles.brandMark}>知</span><span>知途留学</span></div><span className={styles.status}>{targetStep === "planning" ? "06 · Planning Workflow" : targetStep === "gap_results" ? "05 · Gap Table" : targetStep === "gap_interview" ? "04 · 补充匹配信息" : targetStep === "requirements" ? "03 · 申请要求分析" : targetStep === "entry_cycle" ? "02 · 目标申请周期" : "02 · 目标院校与申请范围"}</span></header>
         <section className={styles.targetShell}>
-          <div className={styles.moduleProgress}><span className={profileStatus === "completed" ? styles.moduleDone : styles.moduleSkipped}>{profileStatus === "completed" ? "✓ 基础信息" : "基础信息已跳过"}</span><i /><span className={targetStep === "explore" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "explore" ? "2 目标范围" : "✓ 目标项目"}</span>{targetStep !== "explore" && <><i /><span className={targetStep === "requirements" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "requirements" ? "3 要求确认" : "✓ 要求确认"}</span></>}{(targetStep === "gap_interview" || targetStep === "gap_results") && <><i /><span className={targetStep === "gap_interview" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "gap_interview" ? "4 补充匹配信息" : "✓ 匹配信息"}</span></>}{targetStep === "gap_results" && <><i /><span className={styles.moduleCurrent}>5 Gap Table</span></>}</div>
+          <div className={styles.moduleProgress}><span className={profileStatus === "completed" ? styles.moduleDone : styles.moduleSkipped}>{profileStatus === "completed" ? "✓ 基础信息" : "基础信息已跳过"}</span><i /><span className={targetStep === "explore" || targetStep === "entry_cycle" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "explore" ? "2 目标范围" : targetStep === "entry_cycle" ? "2 申请周期" : "✓ 目标项目"}</span>{targetStep !== "explore" && targetStep !== "entry_cycle" && <><i /><span className={targetStep === "requirements" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "requirements" ? "3 要求确认" : "✓ 要求确认"}</span></>}{(targetStep === "gap_interview" || targetStep === "gap_results" || targetStep === "planning") && <><i /><span className={targetStep === "gap_interview" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "gap_interview" ? "4 补充匹配信息" : "✓ 匹配信息"}</span></>}{(targetStep === "gap_results" || targetStep === "planning") && <><i /><span className={targetStep === "gap_results" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "gap_results" ? "5 Gap Table" : "✓ Gap Table"}</span></>}{targetStep === "planning" && <><i /><span className={styles.moduleCurrent}>6 行动计划</span></>}</div>
 
           {targetStep === "explore" && <>
             <button type="button" className={styles.backButton} onClick={returnToProfile}>← {profileStatus === "completed" ? "返回基础信息" : "补充基础信息"}</button>
@@ -673,16 +820,15 @@ export default function Home() {
             <div className={styles.exploreWorkspace}>
               <section className={`${styles.targetForm} ${styles.exploreFilters}`}>
                 <fieldset><legend>目标国家 / 地区 <small>可多选</small></legend><div className={styles.chipGrid}>{COUNTRY_OPTIONS.map((country) => <button key={country} type="button" className={countries.includes(country) ? styles.selectedChip : ""} onClick={() => toggleCountry(country)}>{countries.includes(country) ? "✓ " : "+ "}{country}</button>)}</div>{!countries.length && <span className={styles.fieldHint}>未选择时显示全球院校</span>}</fieldset>
-                <div className={styles.filterRow}><label><span>目标专业</span><input value={targetMajor} onChange={(event) => { setTargetMajor(event.target.value); setSubjectCandidates([]); setSelectedSubject(""); setSubjectMappingError(""); setCandidateUniversities([]); }} placeholder="例如：人工智能、计算机科学" /></label><label><span>榜单类型</span><select value={rankingType} onChange={(event) => { setRankingType(event.target.value); setCandidateUniversities([]); }}><option value="">请选择榜单</option>{RANKING_OPTIONS.map((ranking) => <option key={ranking} value={ranking}>{ranking}</option>)}</select></label></div>
-                {rankingType === "QS" && <fieldset className={styles.rankingBasis}><legend>QS 排名依据</legend><div><button type="button" className={rankingBasis === "overall" ? styles.selectedBasis : ""} onClick={() => { setRankingBasis("overall"); setCandidateUniversities([]); setDiscoveryError(""); }}><strong>按学校综合排名筛选</strong><span>QS World University Rankings · 2027</span><small>看整所大学的综合实力</small></button><button type="button" className={rankingBasis === "subject" ? styles.selectedBasis : ""} onClick={() => { setRankingBasis("subject"); setCandidateUniversities([]); setDiscoveryError(""); }}><strong>按目标学科排名筛选</strong><span>QS World University Rankings by Subject · 2026</span><small>看目标专业对应学科的实力</small></button></div>{rankingBasis === "subject" && selectedSubject && <p className={styles.currentRankingSubject}><span>当前 QS Subject</span><strong>{selectedSubject}</strong></p>}</fieldset>}
-                {rankingType === "QS" && rankingBasis === "subject" && <div className={styles.subjectMapper}>
+                <div className={styles.filterRow}><label><span>目标专业</span><input value={targetMajor} onChange={(event) => { setTargetMajor(event.target.value); setSubjectCandidates([]); setSelectedSubject(""); setSubjectMappingError(""); setCandidateUniversities([]); }} placeholder="例如：人工智能、计算机科学" /></label><label><span>榜单类型</span><input value="QS World University Rankings" readOnly aria-readonly="true" /></label></div>
+                <fieldset className={styles.rankingBasis}><legend>QS 排名依据</legend><div><button type="button" className={rankingBasis === "overall" ? styles.selectedBasis : ""} onClick={() => { setRankingBasis("overall"); setCandidateUniversities([]); setDiscoveryError(""); }}><strong>按学校综合排名筛选</strong><span>QS World University Rankings · 2027</span><small>看整所大学的综合实力</small></button><button type="button" className={rankingBasis === "subject" ? styles.selectedBasis : ""} onClick={() => { setRankingBasis("subject"); setCandidateUniversities([]); setDiscoveryError(""); }}><strong>按目标学科排名筛选</strong><span>QS World University Rankings by Subject · 2026</span><small>看目标专业对应学科的实力</small></button></div>{rankingBasis === "subject" && selectedSubject && <p className={styles.currentRankingSubject}><span>当前 QS Subject</span><strong>{selectedSubject}</strong></p>}</fieldset>
+                {rankingBasis === "subject" && <div className={styles.subjectMapper}>
                   <div><span>目标专业 → QS Subject</span><p>由 DeepSeek 仅从本地 60 个官方 Subject 中推荐；确认后筛选只查询本地数据库。</p></div>
                   <button type="button" onClick={() => void mapQsSubject()} disabled={!targetMajor.trim() || isMappingSubject}>{isMappingSubject ? "正在匹配…" : subjectCandidates.length ? "重新匹配" : "匹配 QS 学科"}</button>
                   {subjectCandidates.length > 0 && <div className={styles.subjectCandidates}>{subjectCandidates.map((subject) => <button type="button" key={subject} className={selectedSubject === subject ? styles.selectedSubject : ""} onClick={() => { setSelectedSubject(subject); setSubjectMappingError(""); }}>{selectedSubject === subject ? "✓ " : ""}{subject}</button>)}</div>}
                   {subjectMappingError && <p className={styles.subjectError}>{subjectMappingError}</p>}
                 </div>}
                 <div className={styles.filterRow}><label><span>QS 排名从</span><input type="number" min="1" value={rankingMin} onChange={(event) => setRankingMin(event.target.value)} placeholder="1" /></label><label><span>QS 排名到</span><input type="number" min="1" value={rankingMax} onChange={(event) => setRankingMax(event.target.value)} placeholder="100" /></label></div>
-                <div className={styles.filterRow}><label><span>目标入学年份</span><input type="number" min={DEFAULT_ENTRY_YEAR - 1} max="2100" value={intendedEntryYear} onChange={(event) => setIntendedEntryYear(event.target.value)} /></label><label><span>目标入学学期</span><select value={intendedEntryTerm} onChange={(event) => setIntendedEntryTerm(event.target.value as typeof intendedEntryTerm)}><option value="fall">Fall / 秋季</option><option value="spring">Spring / 春季</option><option value="summer">Summer / 夏季</option><option value="winter">Winter / 冬季</option></select></label></div>
                 <label><span>其他偏好 <small>可选</small></span><textarea rows={4} value={additionalPreferences} onChange={(event) => setAdditionalPreferences(event.target.value)} placeholder="例如：偏好大城市、希望有实习机会、预算范围……" /></label>
                 <p className={styles.liveFilterHint}>{isDiscovering ? "正在更新院校列表…" : "院校列表会随筛选条件实时更新"}</p>
               </section>
@@ -717,7 +863,7 @@ export default function Home() {
                           <button className={styles.primaryAction} type="submit" disabled={isConfirmingTarget || !manualProgramUrl.trim()}>{isConfirmingTarget && confirmationUniversity === key ? "正在识别…" : "识别项目链接"}</button>
                           {manualVerifiedProgram?.university === key && <div className={`${styles.programRow} ${styles.manualVerifiedCard}`}>
                             <div><span>{manualVerifiedProgram.university}</span><h4>{manualVerifiedProgram.program}</h4><p className={styles.verifiedStatus}>✓ AI Web Search 已识别</p><a href={manualVerifiedProgram.official_program_url} target="_blank" rel="noopener noreferrer">查看项目页面 ↗</a></div>
-                            <button type="button" onClick={() => setActiveTarget(manualVerifiedProgram)}>设为目标项目</button>
+                            <button type="button" onClick={() => beginEntryCycleSelection(manualVerifiedProgram)}>设为目标项目</button>
                           </div>}
                         </form> : <div className={styles.manualEntryPrompt}><span>没找到你想申请的项目？</span><button type="button" onClick={() => { setManualUniversity(key); setManualProgramUrl(""); setManualVerifiedProgram(null); setConfirmationError(""); }}>手动添加项目</button></div>}
                       </div>
@@ -728,15 +874,25 @@ export default function Home() {
             </div>
           </>}
 
+          {targetStep === "entry_cycle" && pendingTargetProgram && <div className={styles.requirementsReview}>
+            <button type="button" className={styles.backButton} onClick={() => setTargetStep("explore")}>← 返回院校筛选</button>
+            <div className={styles.requirementsHeading}><div><p className={styles.eyebrow}>APPLICATION CYCLE</p><h1>选择目标申请周期</h1><p>确认目标项目后，再选择入学年份和学期；该信息将用于检索对应周期的官方 Timeline。</p></div></div>
+            <div className={styles.activeTargetCard}><span>已选择目标项目</span><strong>{pendingTargetProgram.university}</strong><h2>{pendingTargetProgram.program}</h2></div>
+            <section className={styles.targetForm}>
+              <div className={styles.filterRow}><label><span>目标入学年份</span><input type="number" min={DEFAULT_ENTRY_YEAR - 1} max="2100" value={intendedEntryYear} onChange={(event) => setIntendedEntryYear(event.target.value)} /></label><label><span>目标入学学期</span><select value={intendedEntryTerm} onChange={(event) => setIntendedEntryTerm(event.target.value as typeof intendedEntryTerm)}><option value="fall">Fall / 秋季</option><option value="spring">Spring / 春季</option><option value="summer">Summer / 夏季</option><option value="winter">Winter / 冬季</option></select></label></div>
+              <div className={styles.requirementsActions}><p>若该申请周期的官网时间尚未公布，Timeline 将保持未找到状态，后续计划只按准备阶段生成。</p><button type="button" className={styles.primaryAction} onClick={confirmEntryCycle} disabled={!Number(intendedEntryYear)}>确认申请周期 <span>→</span></button></div>
+            </section>
+          </div>}
+
           {targetStep === "requirements" && activeTargetProgram && <div className={styles.requirementsReview}>
-            <div className={styles.requirementsHeading}><div><p className={styles.eyebrow}>REQUIREMENTS REVIEW</p><h1>目标项目申请要求</h1><p>AI 根据公开网页整理，仅供参考；最终申请要求以院校最新官方信息为准。</p></div><a href={activeTargetProgram.official_program_url} target="_blank" rel="noopener noreferrer">查看项目官网 ↗</a></div>
+            <div className={styles.requirementsHeading}><div><p className={styles.eyebrow}>REQUIREMENTS REVIEW</p><h1>目标项目申请要求</h1><p>AI 根据公开网页整理，仅供参考；最终申请要求以院校最新官方信息为准。</p></div><div className={styles.requirementsHeadingActions}><button type="button" onClick={() => setTargetStep("explore")}>← 返回院校筛选</button><a href={activeTargetProgram.official_program_url} target="_blank" rel="noopener noreferrer">查看项目官网 ↗</a></div></div>
             <div className={styles.activeTargetCard}><span>已选择目标项目</span><strong>{activeTargetProgram.university}</strong><h2>{activeTargetProgram.program}</h2></div>
             {isLoadingTimeline && <div className={styles.timelineCard}><div className={styles.timelineHeading}><div><span>APPLICATION TIMELINE</span><h2>正在检索官方申请时间…</h2></div></div></div>}
             {!isLoadingTimeline && timelineError && <div className={`${styles.discoveryNotice} ${styles.discoveryError}`}><p>{timelineError}</p><button type="button" onClick={() => void retrieveTimeline(activeTargetProgram)}>重新获取时间线</button></div>}
             {!isLoadingTimeline && applicationTimeline && <article className={styles.timelineCard}>
-              <div className={styles.timelineHeading}><div><span>APPLICATION TIMELINE</span><h2>申请时间线</h2></div><strong className={applicationTimeline.status === "complete" ? styles.timelineComplete : applicationTimeline.status === "partial" ? styles.timelinePartial : styles.timelineMissing}>{applicationTimeline.status === "complete" ? "信息完整" : applicationTimeline.status === "partial" ? "部分信息" : "暂未找到"}</strong></div>
+              <div className={styles.timelineHeading}><div><span>APPLICATION TIMELINE</span><h2>申请时间线</h2></div><strong className={applicationTimeline.status === "complete" ? styles.timelineComplete : applicationTimeline.status === "partial" ? styles.timelinePartial : styles.timelineMissing}>{applicationTimeline.status === "complete" ? "信息完整" : applicationTimeline.status === "partial" ? "部分信息" : "该申请周期官方时间尚未公布"}</strong></div>
               <div className={styles.timelineMeta}><div><span>Admission Cycle</span><strong>{applicationTimeline.admission_cycle}</strong></div><div><span>Open Date</span><strong>{applicationTimeline.application_open_date ?? "暂未找到"}</strong>{applicationTimeline.application_open_source_url && <a href={applicationTimeline.application_open_source_url} target="_blank" rel="noopener noreferrer">查看官网来源 ↗</a>}</div><div><span>Rolling Admission</span><strong>{applicationTimeline.rolling_admission === true ? "是" : applicationTimeline.rolling_admission === false ? "否" : "官网未明确"}</strong>{applicationTimeline.rolling_admission_source_url && <a href={applicationTimeline.rolling_admission_source_url} target="_blank" rel="noopener noreferrer">查看官网来源 ↗</a>}</div></div>
-              {applicationTimeline.application_deadlines.length > 0 ? <div className={styles.timelineDeadlines}><h3>Application Deadlines</h3>{applicationTimeline.application_deadlines.map((deadline, index) => <div key={`${deadline.label}-${deadline.date}-${index}`}><div><span>{deadline.type}</span><strong>{deadline.label}</strong></div><time>{deadline.date}</time><a href={deadline.source_url} target="_blank" rel="noopener noreferrer">查看官网来源 ↗</a></div>)}</div> : <p className={styles.timelineEmpty}>当前官方信息中暂未找到该入学周期的申请截止日期。</p>}
+              {applicationTimeline.application_deadlines.length > 0 ? <div className={styles.timelineDeadlines}><h3>Application Deadlines</h3>{applicationTimeline.application_deadlines.map((deadline, index) => <div key={`${deadline.label}-${deadline.date}-${index}`}><div><span>{deadline.type}</span><strong>{deadline.label}</strong></div><time>{deadline.date}</time><a href={deadline.source_url} target="_blank" rel="noopener noreferrer">查看官网来源 ↗</a></div>)}</div> : <p className={styles.timelineEmpty}>{applicationTimeline.status === "not_found" ? "该申请周期官方时间尚未公布" : "当前官方信息中暂未找到该入学周期的申请截止日期。"}</p>}
             </article>}
             {isLoadingRequirements && <div className={styles.requirementsLoading}><i /><strong>AI 正在搜索并整理申请要求…</strong><span>将按 7 类返回 Requirements Snapshot，请稍候。</span></div>}
             {!isLoadingRequirements && requirementsError && <div className={`${styles.discoveryNotice} ${styles.discoveryError}`}><p>{requirementsError}</p><button type="button" onClick={() => void retrieveRequirements(activeTargetProgram)}>重新分析</button></div>}
@@ -753,7 +909,7 @@ export default function Home() {
                 return <article className={styles.requirementCard} key={id}>
                   <div className={styles.requirementCardHeading}><h2>{label}</h2><span className={statusClass}>{COVERAGE_LABELS[category.coverage]}</span></div>
                   {category.coverage === "model_memory_unverified" && <p className={styles.memoryRequirementNote}>以下内容是 AI 参考，当前未确认官方来源；它会参与匹配分析，请结合院校最新信息继续核对。</p>}
-                  {category.requirements.length > 0 ? <div className={styles.requirementItems}>{category.requirements.map((requirement, index) => <div key={`${requirement.requirement}-${index}`}><p>{requirement.requirement}</p>{requirement.requirement_zh && <p className={styles.requirementTranslation}>{requirement.requirement_zh}</p>}<div><span>{IMPORTANCE_LABELS[requirement.importance]}</span><span>{SOURCE_LEVEL_LABELS[requirement.source_level]}</span><span>{requirement.source_type === "user_supplied" ? "用户提供" : requirement.verification_status === "model_memory_unverified" ? "AI 参考 · 当前未确认官方来源" : "AI 检索自官网"}</span></div>{requirement.source_url && <a href={requirement.source_url} target="_blank" rel="noopener noreferrer">{requirement.verification_status === "model_memory_unverified" ? "查看参考页面 ↗" : "查看官网来源 ↗"}</a>}</div>)}</div> : <p className={styles.missingRequirement}>DeepSeek 本次既未获得可用官网信息，也无法提供合理 AI 参考；后续 Gap Analysis 将按“信息不足”处理。</p>}
+                  {category.requirements.length > 0 ? <div className={styles.requirementItems}>{category.requirements.map((requirement, index) => <div key={`${requirement.requirement}-${index}`}><p>{requirement.requirement}</p>{requirement.requirement_zh && <p className={styles.requirementTranslation}>{requirement.requirement_zh}</p>}<div><span>{IMPORTANCE_LABELS[requirement.importance]}</span><span>{SOURCE_LEVEL_LABELS[requirement.source_level]}</span><span>{requirement.source_type === "user_supplied" ? "用户提供" : requirement.verification_status === "model_memory_unverified" ? "AI 参考 · 当前未确认官方来源" : "AI 检索自官网"}</span><span>{TEMPORAL_APPLICABILITY_LABELS[requirement.temporal_applicability]}{requirement.source_cycle ? ` · ${requirement.source_cycle}` : ""}</span></div>{requirement.temporal_note && <p className={styles.requirementTranslation}>周期说明：{requirement.temporal_note}</p>}{requirement.source_url && <a href={requirement.source_url} target="_blank" rel="noopener noreferrer">{requirement.verification_status === "model_memory_unverified" ? "查看参考页面 ↗" : "查看官网来源 ↗"}</a>}</div>)}</div> : <p className={styles.missingRequirement}>DeepSeek 本次既未获得可用官网信息，也无法提供合理 AI 参考；后续 Gap Analysis 将按“信息不足”处理。</p>}
                   {(category.coverage === "not_found" || category.coverage === "model_memory_unverified") && supplementCategory !== id && <button type="button" className={styles.supplementButton} onClick={() => { setSupplementCategory(id); setSupplementRequirement(""); setSupplementSourceUrl(""); }}>补充信息</button>}
                   {supplementCategory === id && <form className={styles.supplementForm} onSubmit={saveRequirementSupplement}><label><span>官网要求原文 *</span><textarea rows={4} value={supplementRequirement} onChange={(event) => setSupplementRequirement(event.target.value)} required /></label><label><span>来源页面 URL <small>推荐</small></span><input type="url" value={supplementSourceUrl} onChange={(event) => setSupplementSourceUrl(event.target.value)} placeholder="https://…" /></label><div><button type="button" onClick={() => setSupplementCategory(null)}>取消</button><button type="submit" disabled={!supplementRequirement.trim()}>保存</button></div></form>}
                 </article>;
@@ -769,7 +925,7 @@ export default function Home() {
             <div className={styles.gapChat}>
               <div className={styles.messages} aria-live="polite">
                 {gapTurns.map((turn, index) => <div key={`${turn.question}-${index}`}><div className={styles.assistantRow}><div className={styles.miniAvatar}>知</div><p>{turn.question}</p></div><div className={styles.userRow}><p>{turn.answer}</p></div></div>)}
-                {!isAnalyzingGap && gapPlan.questions[gapQuestionIndex] && <div className={styles.assistantRow}><div className={styles.miniAvatar}>知</div><p>{gapPlan.questions[gapQuestionIndex].question}</p></div>}
+                {!isAnalyzingGap && gapPlan.questions[gapQuestionIndex] && <div className={styles.assistantRow}><div className={styles.miniAvatar}>知</div><p>{gapFollowUpQuestion || gapPlan.questions[gapQuestionIndex].question}</p></div>}
                 {isAnalyzingGap && <div className={`${styles.assistantRow} ${styles.thinkingRow}`}><div className={styles.miniAvatar}>知</div><p><span>●</span><span>●</span><span>●</span> 正在生成 Gap Table</p></div>}
                 {gapError && <div className={styles.inlineError}>{gapError}</div>}
               </div>
@@ -784,8 +940,31 @@ export default function Home() {
           {targetStep === "gap_results" && activeTargetProgram && gapAnalysis && <div className={styles.gapResultsStage}>
             <div className={styles.gapResultsHeading}><div><p className={styles.eyebrow}>GAP TABLE</p><h1>申请匹配结果</h1><p>{activeTargetProgram.university} · {activeTargetProgram.program}</p></div><button type="button" className={styles.backButton} onClick={() => setTargetStep("requirements")}>返回查看申请要求</button></div>
             <div className={styles.gapSummary}>{(["met", "partial", "not_met", "unknown"] as GapStatus[]).map((status) => <div key={status}><span>{status === "met" ? "满足" : status === "partial" ? "部分满足" : status === "not_met" ? "未满足" : "信息不足"}</span><strong>{gapAnalysis.results.filter((item) => item.status === status).length}</strong></div>)}</div>
-            <div className={styles.gapTableWrap}><table className={styles.gapTable}><thead><tr><th>目标要求</th><th>类型</th><th>匹配状态</th><th>用户证据</th><th>差距</th><th>来源</th></tr></thead><tbody>{gapAnalysis.results.map((result) => <tr key={result.requirement_id}><td><strong>{result.requirement}</strong>{result.requirement_zh && <span className={styles.gapRequirementTranslation}>{result.requirement_zh}</span>}<small>{result.reason}</small></td><td>{REQUIREMENT_CATEGORIES.find((item) => item.id === result.category)?.label ?? result.category}</td><td><span className={result.status === "met" ? styles.gapStatusMet : result.status === "partial" ? styles.gapStatusPartial : result.status === "not_met" ? styles.gapStatusNotMet : styles.gapStatusUnknown}>{result.status === "met" ? "满足" : result.status === "partial" ? "部分满足" : result.status === "not_met" ? "未满足" : "信息不足"}</span></td><td>{result.user_evidence}</td><td>{result.gap}</td><td>{result.requirement_verification_status === "user_supplied" ? "用户补充要求" : result.requirement_verification_status === "model_memory_unverified" ? "AI 参考 · 当前未确认官方来源" : result.source_url ? <a href={result.source_url} target="_blank" rel="noopener noreferrer">官网来源 ↗</a> : "AI 检索自官网"}</td></tr>)}</tbody></table></div>
+            <div className={styles.gapTableWrap}><table className={styles.gapTable}><thead><tr><th>目标要求</th><th>类型</th><th>匹配状态</th><th>用户证据</th><th>差距</th><th>来源</th></tr></thead><tbody>{gapAnalysis.results.map((result) => <tr key={result.requirement_id}><td><strong>{result.requirement}</strong>{result.requirement_zh && <span className={styles.gapRequirementTranslation}>{result.requirement_zh}</span>}<small>{result.reason}</small></td><td>{REQUIREMENT_CATEGORIES.find((item) => item.id === result.category)?.label ?? result.category}</td><td><span className={result.status === "met" ? styles.gapStatusMet : result.status === "partial" ? styles.gapStatusPartial : result.status === "not_met" ? styles.gapStatusNotMet : styles.gapStatusUnknown}>{result.status === "met" ? "满足" : result.status === "partial" ? "部分满足" : result.status === "not_met" ? "未满足" : "信息不足"}</span></td><td>{result.user_evidence}</td><td>{result.gap}</td><td><div>{result.requirement_verification_status === "user_supplied" ? "用户补充要求" : result.requirement_verification_status === "model_memory_unverified" ? "AI 参考 · 当前未确认官方来源" : result.source_url ? <a href={result.source_url} target="_blank" rel="noopener noreferrer">官网来源 ↗</a> : "AI 检索自官网"}</div><small>{TEMPORAL_APPLICABILITY_LABELS[result.temporal_applicability]}{result.source_cycle ? ` · ${result.source_cycle}` : ""}{result.temporal_note ? `：${result.temporal_note}` : ""}</small></td></tr>)}</tbody></table></div>
             {gapAnalysis.informational_requirements.length > 0 && <div className={styles.informationalRequirements}><strong>以下为信息型要求，不参与匹配判断</strong>{gapAnalysis.informational_requirements.map((item) => <p key={item.requirement_id}>{item.requirement}</p>)}</div>}
+            <div className={styles.planningLaunch}><div><strong>生成统一申请时间轴</strong><p>将 Gap Table、官方 Timeline 和当前日期合并为申请级行动计划。</p></div><button type="button" className={styles.primaryAction} onClick={() => void generateActionPlan()} disabled={isPlanningActions}>{isPlanningActions ? "正在生成行动计划…" : "生成 Action Plan"} <span>→</span></button></div>
+            {actionPlanError && <div className={`${styles.discoveryNotice} ${styles.discoveryError}`}>{actionPlanError}</div>}
+          </div>}
+
+          {targetStep === "planning" && activeTargetProgram && actionPlan && <div className={styles.actionPlanStage}>
+            <div className={styles.actionPlanHeading}><div><p className={styles.eyebrow}>PLANNING WORKFLOW</p><h1>申请行动计划</h1><p>{activeTargetProgram.university} · {activeTargetProgram.program}</p></div><button type="button" className={styles.backButton} onClick={() => setTargetStep("gap_results")}>返回 Gap Table</button></div>
+            {actionPlan.timeline_status === "not_found" && <div className={styles.actionPlanNotice}>当前未获取到该项目明确的官方申请时间，以下计划仅按任务优先级和准备阶段生成，不包含精确提交日期。</div>}
+            <div className={styles.actionPlanMeta}>
+              <div><span>当前日期</span><strong>{actionPlan.current_date}</strong></div>
+              <div><span>Ready by</span><strong>{actionPlan.ready_by_date ?? "准备至可提交状态 / Ready for submission"}</strong></div>
+              <div><span>Application Deadline</span><strong>{actionPlan.application_deadline ?? "官网暂未明确"}</strong>{!actionPlan.deadline_is_precise && <small>不会据此生成虚假精确日期</small>}</div>
+            </div>
+            {actionPlan.actions.length === 0 ? <div className={styles.actionPlanEmpty}>当前所有可匹配要求均已满足，无需生成额外任务。</div> : <div className={styles.unifiedTimeline}>
+              {groupPlanningActions(actionPlan.actions).map((group) => <section key={group.timePeriod} className={styles.actionPeriod}>
+                <div className={styles.actionPeriodLabel}><span /> <strong>{planningDisplayText(group.timePeriod, actionPlan.deadline_is_precise)}</strong></div>
+                <div className={styles.actionPeriodItems}>{group.items.map((action) => <article key={action.action_id} className={action.plan_track === "optional" ? styles.optionalAction : styles.mainAction}>
+                  <div className={styles.actionCardTop}><span>{action.plan_track === "optional" ? "可选提升项" : action.action_kind === "confirm_information" ? "信息确认" : "主计划"}</span>{action.target_date && <time>{action.target_date}</time>}</div>
+                  <h2>{planningDisplayText(action.action, actionPlan.deadline_is_precise)}</h2>
+                  <p>{planningDisplayText(action.reason, actionPlan.deadline_is_precise)}</p>
+                  <div className={styles.actionTags}><span>{action.priority === "high" ? "高优先级" : action.priority === "optional" ? "不阻塞主计划" : "常规优先级"}</span><span>{action.status === "pending" ? "待开始" : action.status}</span>{action.parallel_group && <span>可并行 · {action.parallel_group}</span>}</div>
+                </article>)}</div>
+              </section>)}
+            </div>}
           </div>}
         </section>
       </main>

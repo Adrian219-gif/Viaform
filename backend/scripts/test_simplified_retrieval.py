@@ -59,8 +59,8 @@ async def run() -> None:
                 program="MSc Identified Programme",
                 official_program_url="https://elsewhere.example/programme",
             )
-        if output_model is application.RequirementsExtraction:
-            return application.RequirementsExtraction(
+        if output_model is application.RequirementsWebSearchOutput:
+            return application.RequirementsWebSearchOutput(
                 requirements=[
                     application.RequirementItem(
                         category="language",
@@ -71,6 +71,7 @@ async def run() -> None:
                         source_type="official_retrieval",
                         verification_status="official_verified",
                         source_url="https://reference.example/requirements",
+                        temporal_applicability="undated",
                     ),
                     application.RequirementItem(
                         category="materials",
@@ -81,8 +82,14 @@ async def run() -> None:
                         source_type="model_memory",
                         verification_status="model_memory_unverified",
                         source_url="https://public-reference.example/portfolio",
+                        temporal_applicability="unknown",
                     ),
-                ]
+                ],
+                search_audit=application.RequirementsSearchAudit(
+                    search_attempts_completed=2,
+                    programme_page_checked=True,
+                    sections_checked=["Entry requirements", "Supporting documents"],
+                ),
             )
         raise AssertionError(output_model)
 
@@ -137,12 +144,47 @@ async def run() -> None:
         assert materials.requirements[0].requirement_zh
         assert len(review.categories) == 7
         requirements_prompt = next(
-            prompt for prompt in prompts if "Requirements snapshot" in prompt
+            prompt for prompt in prompts if "SECTION-LEVEL SEARCH CONTRACT" in prompt
         )
-        assert "403/WAF" in requirements_prompt
-        assert "do not automatically omit" in requirements_prompt
-        assert "existing knowledge" in requirements_prompt
+        assert "blocked, inaccessible, incomplete" in requirements_prompt
+        assert "ai_reference mechanism" in requirements_prompt
         assert "Only omit a category" in requirements_prompt
+        assert "official_program_url" in requirements_prompt
+        assert "SECTION-LEVEL SEARCH CONTRACT" in requirements_prompt
+        assert "exact programme name, and official domain" in requirements_prompt
+        assert "Entry requirements / Admissions / How to apply /" in requirements_prompt
+        assert (
+            "Supporting documents / Application checklist / programme-specific application"
+            in requirements_prompt
+        )
+        assert "If it is empty, overview-only" in requirements_prompt
+        assert "must use the second search" in requirements_prompt
+        assert "Finding one materials item does not make supporting-document coverage complete" in requirements_prompt
+        assert "EMPTY-RESULT GATE" in requirements_prompt
+        assert "Do not return requirements=[] merely because one search" in requirements_prompt
+        assert "Partial coverage is valid" in requirements_prompt
+        priority_markers = [
+            "required eligibility and required application materials first",
+            "conditional-required items",
+            "recommended or preferred items",
+            "administrative or contextual information",
+        ]
+        assert all(marker in requirements_prompt for marker in priority_markers)
+        assert [requirements_prompt.index(marker) for marker in priority_markers] == sorted(
+            requirements_prompt.index(marker) for marker in priority_markers
+        )
+        assert "transcripts, degree certificates, CVs or resumes" in requirements_prompt
+        assert "programme-specific forms, sheets, or questionnaires" in requirements_prompt
+        assert "Do not merge or omit separate required materials" in requirements_prompt
+        assert "There is no numeric item limit for required or conditional-required Requirements" in requirements_prompt
+        assert "importance must be exactly one of: required, recommended, preferred, unknown" in requirements_prompt
+        assert "conditional_required is not a valid importance value" in requirements_prompt
+        assert "For a conditional Requirement, output importance=required" in requirements_prompt
+        assert "preserve the complete applicability condition in the requirement text" in requirements_prompt
+        assert "Return at most twelve concise requirements" not in requirements_prompt
+        assert "must not be returned as Requirements" in requirements_prompt
+        assert "SEARCH AUDIT OUTPUT" in requirements_prompt
+        assert "search_audit.search_attempts_completed" in requirements_prompt
 
         ai_only = application.requirements_review_from_extraction(
             selected,
@@ -157,6 +199,7 @@ async def run() -> None:
                         source_type="model_memory",
                         verification_status="model_memory_unverified",
                         source_url=None,
+                        temporal_applicability="unknown",
                     )
                 ]
             ),

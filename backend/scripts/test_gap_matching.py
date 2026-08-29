@@ -55,6 +55,9 @@ def planned_requirement(
         requirement=requirement,
         importance=importance,
         requirement_verification_status=verification_status,
+        temporal_applicability=(
+            "undated" if verification_status == "official_verified" else "unknown"
+        ),
         source_url=(
             "https://example.edu/programme"
             if verification_status == "official_verified"
@@ -102,6 +105,7 @@ async def check_ai_reference_interview() -> None:
                         source_level="unknown",
                         source_type="model_memory",
                         verification_status="model_memory_unverified",
+                        temporal_applicability="undated",
                     )
                 ],
             )
@@ -183,6 +187,7 @@ async def check_evidence_type_synonym_compatibility() -> None:
                         source_type="official_retrieval",
                         verification_status="official_verified",
                         source_url="https://example.edu/requirements",
+                        temporal_applicability="undated",
                     )
                 ],
             ),
@@ -198,6 +203,7 @@ async def check_evidence_type_synonym_compatibility() -> None:
                         source_type="official_retrieval",
                         verification_status="official_verified",
                         source_url="https://example.edu/requirements",
+                        temporal_applicability="undated",
                     )
                 ],
             ),
@@ -375,9 +381,26 @@ def main() -> None:
         "score",
         [GapConstraintOption(key="gpa", minimum=3.5, scale=4.0)],
     )
-    average_only = parse_one("gpa", "academic_score", "我的平均分是 86/100")
-    assert average_only.availability == "unknown"
-    assert evaluate_deterministic_requirement(gpa_requirement, {"gpa": average_only})[0] == "unknown"
+    average_only = parse_gap_evidence(
+        GapEvidenceParseRequest(
+            question=GapPlannerQuestion(
+                question_id="q:gpa",
+                question="请提供 GPA。",
+                evidence_keys=["gpa"],
+            ),
+            evidence_needs=[
+                GapEvidenceNeed(
+                    key="gpa",
+                    evidence_type="academic_score",
+                    label="GPA",
+                    required_fields=["score"],
+                )
+            ],
+            answer="我的平均分是 86/100",
+        )
+    )
+    assert not average_only.evidence
+    assert average_only.missing_slots == ["gpa.score"]
 
     course_unknown = parse_one(
         "courses",
@@ -401,6 +424,7 @@ def main() -> None:
                         source_level="unknown",
                         source_type="model_memory",
                         verification_status="model_memory_unverified",
+                        temporal_applicability="unknown",
                     )
                 ],
             ),
@@ -416,6 +440,7 @@ def main() -> None:
                         source_type="official_retrieval",
                         verification_status="official_verified",
                         source_url="https://example.edu/programme",
+                        temporal_applicability="undated",
                     )
                 ],
             ),

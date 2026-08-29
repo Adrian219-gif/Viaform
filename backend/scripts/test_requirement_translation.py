@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import sys
 from pathlib import Path
@@ -12,7 +13,18 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from pydantic import ValidationError  # noqa: E402
+
 from app.main import RequirementItem, RequirementsExtraction  # noqa: E402
+
+
+class WarningCapture(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
 
 
 def numbers(text: str) -> list[str]:
@@ -34,10 +46,49 @@ def official_item(
         source_type="official_retrieval",
         verification_status="official_verified",
         source_url="https://example.edu/programme",
+        temporal_applicability="undated",
     )
 
 
+def check_importance_enum_compatibility() -> None:
+    capture = WarningCapture()
+    logger = logging.getLogger("app.main")
+    logger.addHandler(capture)
+    try:
+        alias = official_item(
+            "materials",
+            "A programme-specific form is required when the stated condition applies.",
+            None,
+            "conditional_required",  # type: ignore[arg-type]
+        )
+    finally:
+        logger.removeHandler(capture)
+    assert alias.importance == "required"
+    assert any(
+        "requirements_importance_alias" in message
+        and "conditional_required" in message
+        for message in capture.messages
+    )
+
+    for importance in ("required", "recommended", "preferred", "unknown"):
+        assert official_item("materials", "Example requirement.", None, importance).importance == importance
+
+    try:
+        official_item(
+            "materials",
+            "Example requirement.",
+            None,
+            "mandatory",  # type: ignore[arg-type]
+        )
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("unknown importance values must not pass validation")
+
+
 def main() -> None:
+    check_importance_enum_compatibility()
+
     language = official_item(
         "language",
         "IELTS overall 7.0 with at least 6.5 in each component.",
@@ -74,6 +125,7 @@ def main() -> None:
             "source_type": "official_retrieval",
             "verification_status": "official_verified",
             "source_url": "https://example.edu/programme",
+            "temporal_applicability": "undated",
         }
     )
     assert legacy.requirement_zh is None
