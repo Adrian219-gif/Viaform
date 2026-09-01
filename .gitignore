@@ -6,3 +6,9 @@
 # Python local build artifacts.
 __pycache__/
 *.py[cod]
+
+# Runtime programme cache (tracked seed snapshots live under backend/data/seed).
+backend/data/runtime/*.sqlite
+backend/data/runtime/*.sqlite-wal
+backend/data/runtime/*.sqlite-shm
+backend/data/runtime/*.sqlite-journal

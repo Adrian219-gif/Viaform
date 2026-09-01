@@ -247,9 +247,10 @@
 .subjectMapper>div:first-child>p { margin-top:5px; color:#849089; font-size:11px; line-height:1.6; }
 .subjectMapper>button { padding:10px 14px; border:1px solid #89b5a5; border-radius:9px; color:var(--green); background:#fff; font-size:11px; font-weight:800; cursor:pointer; }
 .subjectMapper>button:disabled { opacity:.45; cursor:default; }
-.subjectCandidates { grid-column:1/-1; display:flex; flex-wrap:wrap; gap:8px; }
-.subjectCandidates button { padding:9px 12px; border:1px solid #ccd9d3; border-radius:999px; color:#596760; background:#fff; font-size:11px; cursor:pointer; }
-.subjectCandidates button.selectedSubject { border-color:#2e8067; color:#fff; background:var(--green); }
+.subjectCombobox { grid-column:1/-1; display:grid; gap:7px; }
+.subjectCombobox span { color:#52635c; font-size:10px; font-weight:800; }
+.subjectCombobox input { width:100%; padding:11px 12px; border:1px solid #cbd8d2; border-radius:9px; color:#2f4039; background:#fff; font:inherit; }
+.subjectHint { grid-column:1/-1; color:#806f3d; font-size:11px; }
 .subjectError { grid-column:1/-1; color:#a94d42; font-size:11px; }
 .liveFilterHint { grid-column:1/-1; color:#73827b; font-size:11px; text-align:right; }
 .filterSubmit { display:flex; align-items:center; justify-content:space-between; gap:18px; }
@@ -342,6 +343,16 @@
 .gapChat .messages { min-height:430px; max-height:58vh; padding-top:30px; }
 .gapQuickAnswers { margin-top:9px; display:flex; gap:8px; }
 .gapQuickAnswers button { padding:6px 10px; border:1px solid #cfdbd5; border-radius:8px; color:#627169; background:#fff; font-size:11px; cursor:pointer; }
+.structuredComposer { padding:18px 32px 20px; border-top:1px solid #e6ebe8; background:#fcfdfc; }
+.structuredOptions { display:flex; flex-wrap:wrap; gap:9px; }
+.structuredOptions button { padding:10px 14px; border:1px solid #ccd8d2; border-radius:10px; color:#43534b; background:#fff; cursor:pointer; }
+.structuredOptions button.selectedStructuredOption { border-color:var(--green); color:var(--green-dark); background:#edf7f3; }
+.structuredOptions button:disabled,.structuredSubmit:disabled,.gapQuickAnswers button:disabled { opacity:.45; cursor:default; }
+.structuredFields { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
+.structuredFields label { display:grid; gap:6px; color:#58645f; font-size:12px; font-weight:700; }
+.structuredFields input { min-width:0; padding:10px 12px; border:1px solid #ccd8d2; border-radius:10px; color:var(--ink); background:#fff; font:inherit; }
+.structuredFields input:focus { border-color:#65a68e; outline:0; box-shadow:0 0 0 3px rgba(20,108,85,.09); }
+.structuredSubmit { margin-top:12px; padding:9px 18px; border:0; border-radius:9px; color:#fff; background:var(--green); cursor:pointer; }
 .gapResultsHeading { margin-bottom:24px; display:flex; align-items:flex-end; justify-content:space-between; gap:24px; }
 .gapResultsHeading p:last-child { color:#718078; font-size:13px; }
 .gapSummary { margin-bottom:20px; display:grid; grid-template-columns:repeat(4,1fr); overflow:hidden; border:1px solid #dbe4df; border-radius:16px; background:#fff; }

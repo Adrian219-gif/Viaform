@@ -23,6 +23,7 @@ type ExploreTarget = {
   countries: string[];
   target_major: string;
   ranking: { type: "QS"; basis: "overall" | "subject"; min: number | null; max: number | null };
+  ranking_subject_id: string | null;
   ranking_subject: string | null;
   additional_preferences: string;
 };
@@ -74,13 +75,40 @@ type RequirementItem = {
   temporal_note: string | null;
 };
 type RequirementCategoryReview = { category: RequirementCategory; coverage: RequirementCoverage; requirements: RequirementItem[] };
-type TargetProgramRequirementsReview = { target_program: TargetProgram; checked_at: string; categories: RequirementCategoryReview[] };
+type TargetProgramRequirementsReview = { target_program: TargetProgram; checked_at: string; cache_source: "live" | "runtime_cache" | "seed"; categories: RequirementCategoryReview[] };
 type EvidenceAvailability = "known" | "known_negative" | "unknown";
 type GapStatus = "met" | "partial" | "not_met" | "unknown";
+type GapReasonCode = "matched" | "partially_matched" | "requirement_not_met" | "user_evidence_missing" | "temporal_unconfirmed" | "previous_cycle_reference" | "semantic_evidence_insufficient" | "conditional_pending";
+type ConditionalApplicabilityState = "not_conditional" | "active" | "inactive" | "pending";
 type GapEvidenceType = "education_university" | "education_major" | "academic_score" | "language_score" | "standardized_score" | "courses" | "material_status" | "material_quantity" | "experience" | "generic";
 type UserEvidence = { evidence_type: GapEvidenceType; key: string; value: unknown; raw_answer: string; availability: EvidenceAvailability; updated_at: string; source_requirement_ids: string[] };
 type GapEvidenceNeed = { key: string; evidence_type: GapEvidenceType; label: string; already_known: boolean; required_fields: string[]; evidence_group: string | null; group_relation: "all" | "any"; minimum: number | null; component_minimum: number | null; required_quantity: number | null };
-type GapQuestion = { question_id: string; question: string; evidence_keys: string[] };
+type GapQuestionControlType = "boolean" | "boolean_group" | "experience_form" | "single_select" | "multi_select" | "number" | "number_group" | "date" | "short_text" | "text_fallback";
+type GapQuestionOption = { value: string; label: string; evidence_key: string | null; evidence_value: unknown };
+type GapQuestionField = { field_id: string; label: string; evidence_key: string; value_path: string; required: boolean; placeholder: string | null };
+type GapQuestion = {
+  question_id: string;
+  requirement_id: string | null;
+  question: string;
+  prompt: string;
+  evidence_keys: string[];
+  expected_evidence_keys: string[];
+  allowed_evidence_keys: string[];
+  evidence_group: string | null;
+  group_relation: "all" | "any";
+  control_type: GapQuestionControlType;
+  options: GapQuestionOption[];
+  fields: GapQuestionField[];
+  validation: { required: boolean; minimum: number | null; maximum: number | null; step: number | null; min_selections: number | null; max_selections: number | null };
+  allow_unknown: boolean;
+  allow_negative: boolean;
+  allow_other: boolean;
+  schema_status: "valid" | "invalid" | "fallback" | "generation_error";
+  schema_error_code: string | null;
+  repair_attempts: number;
+};
+type GapEvidenceResponse = { evidence: UserEvidence[]; missing_slots: string[]; follow_up_question: string | null; satisfied_evidence_groups: string[]; parser_calls: number };
+type SelectedLanguageTest = { questionId: string; evidenceKey: "ielts" | "toefl"; label: string };
 type GapPlannedRequirement = {
   requirement_id: string;
   category: RequirementCategory;
@@ -92,6 +120,14 @@ type GapPlannedRequirement = {
   source_cycle: string | null;
   temporal_applicability: RequirementTemporalApplicability;
   temporal_note: string | null;
+  conditional_state: ConditionalApplicabilityState;
+  conditional: {
+    is_conditional: boolean;
+    condition_text: string | null;
+    controlling_evidence_keys: string[];
+    predicate_relation: "all" | "any";
+    predicates: { evidence_key: string; operator: "equals" | "in"; expected_values: string[] }[];
+  };
   matchable: boolean;
   informational_reason: string;
   match_strategy: "deterministic" | "semantic" | "hybrid";
@@ -99,7 +135,7 @@ type GapPlannedRequirement = {
   constraint: { kind: string; options: unknown[] };
 };
 type GapPlan = { target_program: TargetProgram; requirements: GapPlannedRequirement[]; questions: GapQuestion[]; reusable_evidence: UserEvidence[]; planning_llm_requests: number };
-type GapResult = { requirement_id: string; category: RequirementCategory; requirement: string; requirement_zh?: string | null; requirement_verification_status: "official_verified" | "model_memory_unverified" | "user_supplied"; importance: RequirementItem["importance"]; status: GapStatus; user_evidence: string; gap: string; reason: string; source_url: string | null; source_cycle: string | null; temporal_applicability: RequirementTemporalApplicability; temporal_note: string | null };
+type GapResult = { requirement_id: string; category: RequirementCategory; requirement: string; requirement_zh?: string | null; requirement_verification_status: "official_verified" | "model_memory_unverified" | "user_supplied"; importance: RequirementItem["importance"]; status: GapStatus; reason_code: GapReasonCode; user_evidence: string; gap: string; reason: string; source_url: string | null; source_cycle: string | null; temporal_applicability: RequirementTemporalApplicability; temporal_note: string | null; conditional_state: ConditionalApplicabilityState };
 type GapAnalysisResponse = { target_program: TargetProgram; results: GapResult[]; informational_requirements: GapPlannedRequirement[]; semantic_llm_requests: number };
 type PlanningAction = {
   action_id: string;
@@ -147,7 +183,8 @@ type CandidateUniversity = {
   subject_ranking: SubjectRanking | null;
   school_official_url: string | null;
 };
-type SubjectMappingResponse = { target_major: string; candidates: string[] };
+type QSSubjectOption = { subject_id: string; subject_name: string; edition: number };
+type QSSubjectListResponse = { edition: number; subjects: QSSubjectOption[] };
 
 const COUNTRY_OPTIONS = ["美国", "英国", "中国香港", "新加坡", "澳大利亚", "加拿大", "德国", "欧洲其他地区"];
 const REQUIREMENT_CATEGORIES: { id: RequirementCategory; label: string }[] = [
@@ -184,6 +221,20 @@ const TEMPORAL_APPLICABILITY_LABELS: Record<RequirementTemporalApplicability, st
   not_yet_published: "目标周期尚未发布",
   unknown: "周期适用性待确认",
 };
+const UNKNOWN_GAP_REASON_LABELS: Partial<Record<GapReasonCode, string>> = {
+  user_evidence_missing: "信息不足",
+  temporal_unconfirmed: "目标周期待确认",
+  previous_cycle_reference: "上一周期参考",
+  semantic_evidence_insufficient: "仍需语义确认",
+  conditional_pending: "适用条件待确认",
+};
+
+function gapStatusLabel(result: GapResult): string {
+  if (result.status === "met") return "满足";
+  if (result.status === "partial") return "部分满足";
+  if (result.status === "not_met") return "未满足";
+  return UNKNOWN_GAP_REASON_LABELS[result.reason_code] ?? "信息不足";
+}
 
 const EMPTY_PROFILE: UserProfile = {
   education: { university: "", major: "", gpa: null, average_score: null, courses: [] },
@@ -242,10 +293,13 @@ export default function Home() {
   const [countries, setCountries] = useState<string[]>([]);
   const [targetMajor, setTargetMajor] = useState("");
   const [rankingBasis, setRankingBasis] = useState<"overall" | "subject">("overall");
-  const [subjectCandidates, setSubjectCandidates] = useState<string[]>([]);
+  const [qsSubjects, setQsSubjects] = useState<QSSubjectOption[]>([]);
+  const [subjectSearch, setSubjectSearch] = useState("");
+  const [selectedSubjectId, setSelectedSubjectId] = useState("");
   const [selectedSubject, setSelectedSubject] = useState("");
-  const [isMappingSubject, setIsMappingSubject] = useState(false);
-  const [subjectMappingError, setSubjectMappingError] = useState("");
+  const [subjectUncertain, setSubjectUncertain] = useState(false);
+  const [isLoadingSubjects, setIsLoadingSubjects] = useState(false);
+  const [subjectListError, setSubjectListError] = useState("");
   const [rankingMin, setRankingMin] = useState("1");
   const [rankingMax, setRankingMax] = useState("100");
   const [intendedEntryYear, setIntendedEntryYear] = useState(String(DEFAULT_ENTRY_YEAR));
@@ -279,11 +333,17 @@ export default function Home() {
   const [gapQuestionIndex, setGapQuestionIndex] = useState(0);
   const [gapFollowUpQuestion, setGapFollowUpQuestion] = useState("");
   const [gapFollowUpSlots, setGapFollowUpSlots] = useState<string[]>([]);
+  const [gapFollowUpQuestionId, setGapFollowUpQuestionId] = useState("");
   const [satisfiedEvidenceGroups, setSatisfiedEvidenceGroups] = useState<string[]>([]);
   const [gapTurns, setGapTurns] = useState<{ question: string; answer: string }[]>([]);
   const [gapInput, setGapInput] = useState("");
+  const [gapStructuredValues, setGapStructuredValues] = useState<Record<string, string | number | boolean>>({});
+  const [gapSelectedOptions, setGapSelectedOptions] = useState<string[]>([]);
+  const [selectedLanguageTest, setSelectedLanguageTest] = useState<SelectedLanguageTest | null>(null);
+  const [gapOtherMode, setGapOtherMode] = useState(false);
   const [isPlanningGap, setIsPlanningGap] = useState(false);
   const [isParsingGapAnswer, setIsParsingGapAnswer] = useState(false);
+  const [isRepairingGapQuestion, setIsRepairingGapQuestion] = useState(false);
   const [isAnalyzingGap, setIsAnalyzingGap] = useState(false);
   const [gapError, setGapError] = useState("");
   const [gapAnalysis, setGapAnalysis] = useState<GapAnalysisResponse | null>(null);
@@ -364,7 +424,12 @@ export default function Home() {
     setGapQuestionIndex(0);
     setGapFollowUpQuestion("");
     setGapFollowUpSlots([]);
+    setGapFollowUpQuestionId("");
     setSatisfiedEvidenceGroups([]);
+    setGapStructuredValues({});
+    setGapSelectedOptions([]);
+    setSelectedLanguageTest(null);
+    setGapOtherMode(false);
     setGapTurns([]);
     setGapInput("");
     setGapAnalysis(null);
@@ -392,7 +457,7 @@ export default function Home() {
     setPendingTargetProgram(null);
   }
 
-  async function retrieveRequirements(targetProgram: TargetProgram) {
+  async function retrieveRequirements(targetProgram: TargetProgram, forceRefresh = false) {
     if (isLoadingRequirements) return;
     setIsLoadingRequirements(true);
     setRequirementsError("");
@@ -402,7 +467,7 @@ export default function Home() {
       REQUIREMENTS_RETRIEVAL_TIMEOUT_MS,
     );
     try {
-      const response = await fetch(`${API_BASE_URL}/target-programs/requirements`, {
+      const response = await fetch(`${API_BASE_URL}/target-programs/requirements?force_refresh=${forceRefresh}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(targetProgram),
@@ -425,14 +490,14 @@ export default function Home() {
     }
   }
 
-  async function retrieveTimeline(targetProgram: TargetProgram) {
+  async function retrieveTimeline(targetProgram: TargetProgram, forceRefresh = false) {
     if (isLoadingTimeline) return;
     setIsLoadingTimeline(true);
     setTimelineError("");
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), TIMELINE_RETRIEVAL_TIMEOUT_MS);
     try {
-      const response = await fetch(`${API_BASE_URL}/target-programs/timeline`, {
+      const response = await fetch(`${API_BASE_URL}/target-programs/timeline?force_refresh=${forceRefresh}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -512,7 +577,7 @@ export default function Home() {
         }),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.detail ?? "暂时无法完成匹配分析。");
+      if (!response.ok) throw new Error("匹配分析生成失败，请重新尝试。");
       setGapAnalysis(data as GapAnalysisResponse);
       setTargetStep("gap_results");
     } catch (error) {
@@ -531,7 +596,9 @@ export default function Home() {
     setGapQuestionIndex(0);
     setGapFollowUpQuestion("");
     setGapFollowUpSlots([]);
+    setGapFollowUpQuestionId("");
     setSatisfiedEvidenceGroups([]);
+    setSelectedLanguageTest(null);
     try {
       const response = await fetch(`${API_BASE_URL}/gap/plan`, {
         method: "POST",
@@ -544,13 +611,13 @@ export default function Home() {
         }),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.detail ?? "暂时无法规划匹配访谈。");
+      if (!response.ok) throw new Error("匹配分析生成失败，请重新尝试。");
       const plan = data as GapPlan;
       setGapPlan(plan);
       setTargetStep("gap_interview");
       if (plan.questions.length === 0) await analyzeGap(plan, userEvidence);
     } catch (error) {
-      setGapError(error instanceof Error ? error.message : "暂时无法规划匹配访谈。");
+      setGapError(error instanceof Error ? error.message : "匹配分析生成失败，请重新尝试。");
     } finally {
       setIsPlanningGap(false);
     }
@@ -590,26 +657,167 @@ export default function Home() {
     }
   }
 
+  function currentGapEvidenceContext(question: GapQuestion) {
+    if (!gapPlan) return { needs: [] as GapEvidenceNeed[], activeEvidenceKeys: [] as string[] };
+    const allNeeds = gapPlan.requirements
+      .flatMap((item) => item.evidence_needs);
+    const allowedEvidenceKeys = (question.allowed_evidence_keys ?? []).length > 0
+      ? question.allowed_evidence_keys
+      : question.expected_evidence_keys;
+    const needs = allowedEvidenceKeys.flatMap((key) => {
+      const matching = allNeeds.filter((need) => need.key === key);
+      const preferred = matching.find((need) => question.evidence_group && need.evidence_group === question.evidence_group) ?? matching[0];
+      return preferred ? [preferred] : [];
+    });
+    const hasActiveFollowUp = gapFollowUpQuestionId === question.question_id && gapFollowUpSlots.length > 0;
+    const activeEvidenceKeys = hasActiveFollowUp
+      ? needs.filter((need) => gapFollowUpSlots.some((slot) => slot.startsWith(`${need.key}.`))).map((need) => need.key)
+      : question.expected_evidence_keys;
+    return { needs, activeEvidenceKeys: Array.from(new Set(activeEvidenceKeys)) };
+  }
+
+  async function finishGapEvidenceSubmission(
+    question: GapQuestion,
+    parsed: GapEvidenceResponse,
+    displayedQuestion: string,
+    answerLabel: string,
+  ) {
+    if (!gapPlan) return;
+    const allNeeds = gapPlan.requirements
+      .flatMap((item) => item.evidence_needs)
+      .filter((need, index, all) => all.findIndex((item) => item.key === need.key) === index);
+    const nextEvidence = mergeEvidence(userEvidence, parsed.evidence);
+    const nextSatisfiedGroups = Array.from(new Set([...satisfiedEvidenceGroups, ...parsed.satisfied_evidence_groups]));
+    setUserEvidence(nextEvidence);
+    setSatisfiedEvidenceGroups(nextSatisfiedGroups);
+    setGapTurns((current) => [...current, { question: displayedQuestion, answer: answerLabel }]);
+    setGapInput("");
+    setGapStructuredValues({});
+    setGapSelectedOptions([]);
+    setGapOtherMode(false);
+    if (parsed.missing_slots.length > 0 && parsed.follow_up_question) {
+      setGapFollowUpQuestion(parsed.follow_up_question);
+      setGapFollowUpSlots(parsed.missing_slots);
+      setGapFollowUpQuestionId(question.question_id);
+      return;
+    }
+    setSelectedLanguageTest(null);
+    setGapFollowUpQuestion("");
+    setGapFollowUpSlots([]);
+    setGapFollowUpQuestionId("");
+    const currentRequirement = gapPlan.requirements.find(
+      (item) => item.requirement_id === question.requirement_id,
+    );
+    const completedControllingQuestion = Boolean(
+      currentRequirement?.conditional_state === "pending"
+      && currentRequirement.conditional?.controlling_evidence_keys.some((key) =>
+        question.expected_evidence_keys.includes(key),
+      ),
+    );
+    if (completedControllingQuestion && activeTargetProgram && requirementsReview) {
+      try {
+        const response = await fetch(`${API_BASE_URL}/gap/plan`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            target_program: activeTargetProgram,
+            requirements_review: requirementsReview,
+            user_profile: profile,
+            user_evidence: nextEvidence,
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error("匹配分析生成失败，请重新尝试。");
+        const refreshedPlan = data as GapPlan;
+        setGapPlan(refreshedPlan);
+        setGapQuestionIndex(0);
+        if (refreshedPlan.questions.length === 0) {
+          await analyzeGap(refreshedPlan, nextEvidence);
+        }
+        return;
+      } catch (error) {
+        setGapError(error instanceof Error ? error.message : "匹配分析生成失败，请重新尝试。");
+        return;
+      }
+    }
+    const evidenceByKey = new Map(nextEvidence.map((item) => [item.key.toLowerCase(), item]));
+    const nextQuestionIndex = gapPlan.questions.findIndex((candidate, index) => index > gapQuestionIndex && candidate.expected_evidence_keys.some((key) => {
+      const need = allNeeds.find((item) => item.key === key);
+      return need && !evidenceByKey.has(key.toLowerCase()) && (!need.evidence_group || !nextSatisfiedGroups.includes(need.evidence_group));
+    }));
+    if (nextQuestionIndex < 0) {
+      await analyzeGap(gapPlan, nextEvidence);
+    } else {
+      setGapQuestionIndex(nextQuestionIndex);
+    }
+  }
+
+  async function submitStructuredGapAnswer(
+    answer: { values?: Record<string, string | number | boolean>; selected_options?: string[]; terminal_state?: "known_negative" | "unknown" },
+    answerLabel: string,
+    questionOverride?: GapQuestion,
+    displayedQuestionOverride?: string,
+  ) {
+    const question = questionOverride ?? gapPlan?.questions[gapQuestionIndex];
+    if (!question || !gapPlan || isParsingGapAnswer) return;
+    const { needs, activeEvidenceKeys } = currentGapEvidenceContext(question);
+    setIsParsingGapAnswer(true);
+    setGapError("");
+    try {
+      const displayedQuestion = displayedQuestionOverride ?? (gapFollowUpQuestionId === question.question_id && gapFollowUpQuestion
+        ? gapFollowUpQuestion
+        : question.prompt || question.question);
+      const response = await fetch(`${API_BASE_URL}/gap/evidence/submit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: {
+            ...question,
+            evidence_keys: activeEvidenceKeys,
+            expected_evidence_keys: activeEvidenceKeys,
+          },
+          evidence_needs: needs,
+          existing_evidence: userEvidence,
+          answer: {
+            values: answer.values ?? {},
+            selected_options: answer.selected_options ?? [],
+            terminal_state: answer.terminal_state ?? null,
+          },
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error("这个问题暂时无法正常提交，请尝试重新生成或使用补充说明。");
+      }
+      await finishGapEvidenceSubmission(question, data as GapEvidenceResponse, displayedQuestion, answerLabel);
+    } catch (error) {
+      setGapError(error instanceof Error ? error.message : "暂时无法记录这条回答。");
+    } finally {
+      setIsParsingGapAnswer(false);
+    }
+  }
+
   async function submitGapAnswer(value: string) {
     const answer = value.trim();
     const question = gapPlan?.questions[gapQuestionIndex];
     if (!answer || !question || !gapPlan || isParsingGapAnswer) return;
-    const allNeeds = gapPlan.requirements
-      .flatMap((item) => item.evidence_needs)
-      .filter((need, index, all) => all.findIndex((item) => item.key === need.key) === index);
-    const activeEvidenceKeys = gapFollowUpSlots.length > 0
-      ? allNeeds.filter((need) => gapFollowUpSlots.some((slot) => slot.startsWith(`${need.key}.`))).map((need) => need.key)
-      : question.evidence_keys;
-    const needs = allNeeds.filter((need) => activeEvidenceKeys.includes(need.key));
+    const { needs, activeEvidenceKeys } = currentGapEvidenceContext(question);
     setIsParsingGapAnswer(true);
     setGapError("");
     try {
-      const displayedQuestion = gapFollowUpQuestion || question.question;
+      const displayedQuestion = gapFollowUpQuestionId === question.question_id && gapFollowUpQuestion
+        ? gapFollowUpQuestion
+        : question.question;
       const response = await fetch(`${API_BASE_URL}/gap/evidence/parse`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          question: { ...question, question: displayedQuestion, evidence_keys: activeEvidenceKeys },
+          question: {
+            ...question,
+            question: displayedQuestion,
+            evidence_keys: activeEvidenceKeys,
+            expected_evidence_keys: activeEvidenceKeys,
+          },
           evidence_needs: needs,
           existing_evidence: userEvidence,
           answer,
@@ -617,35 +825,313 @@ export default function Home() {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail ?? "暂时无法记录这条回答。");
-      const parsed = data as { evidence: UserEvidence[]; missing_slots: string[]; follow_up_question: string | null; satisfied_evidence_groups: string[] };
-      const nextEvidence = mergeEvidence(userEvidence, parsed.evidence);
-      const nextSatisfiedGroups = Array.from(new Set([...satisfiedEvidenceGroups, ...parsed.satisfied_evidence_groups]));
-      setUserEvidence(nextEvidence);
-      setSatisfiedEvidenceGroups(nextSatisfiedGroups);
-      setGapTurns((current) => [...current, { question: displayedQuestion, answer }]);
-      setGapInput("");
-      if (parsed.missing_slots.length > 0 && parsed.follow_up_question) {
-        setGapFollowUpQuestion(parsed.follow_up_question);
-        setGapFollowUpSlots(parsed.missing_slots);
-        return;
-      }
-      setGapFollowUpQuestion("");
-      setGapFollowUpSlots([]);
-      const evidenceByKey = new Map(nextEvidence.map((item) => [item.key.toLowerCase(), item]));
-      const nextQuestionIndex = gapPlan.questions.findIndex((candidate, index) => index > gapQuestionIndex && candidate.evidence_keys.some((key) => {
-        const need = allNeeds.find((item) => item.key === key);
-        return need && !evidenceByKey.has(key.toLowerCase()) && (!need.evidence_group || !nextSatisfiedGroups.includes(need.evidence_group));
-      }));
-      if (nextQuestionIndex < 0) {
-        await analyzeGap(gapPlan, nextEvidence);
-      } else {
-        setGapQuestionIndex(nextQuestionIndex);
-      }
+      await finishGapEvidenceSubmission(question, data as GapEvidenceResponse, displayedQuestion, answer);
     } catch (error) {
       setGapError(error instanceof Error ? error.message : "暂时无法记录这条回答。");
     } finally {
       setIsParsingGapAnswer(false);
     }
+  }
+
+  async function regenerateGapQuestion(question: GapQuestion) {
+    if (!gapPlan || isRepairingGapQuestion || !question.requirement_id) return;
+    const requirement = gapPlan.requirements.find((item) => item.requirement_id === question.requirement_id);
+    if (!requirement) return;
+    setIsRepairingGapQuestion(true);
+    setGapError("");
+    try {
+      const response = await fetch(`${API_BASE_URL}/gap/questions/repair`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          requirement,
+          user_profile: profile,
+          user_evidence: userEvidence,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error("这个问题暂时无法生成，请重新尝试。");
+      const repaired = data as GapQuestion;
+      setGapPlan((current) => current ? {
+        ...current,
+        questions: current.questions.map((item) => item.question_id === question.question_id ? repaired : item),
+      } : current);
+      setGapStructuredValues({});
+      setGapSelectedOptions([]);
+      setGapOtherMode(false);
+      if (repaired.schema_status !== "valid" || repaired.control_type === "text_fallback") {
+        setGapError("这个问题暂时无法生成，请重新尝试。");
+      }
+    } catch {
+      setGapError("这个问题暂时无法生成，请重新尝试。");
+    } finally {
+      setIsRepairingGapQuestion(false);
+    }
+  }
+
+  function beginLanguageScoreForm(question: GapQuestion, option: GapQuestionOption): boolean {
+    const evidenceKey = option.evidence_key?.toLowerCase();
+    if (evidenceKey !== "ielts" && evidenceKey !== "toefl") return false;
+    const { needs } = currentGapEvidenceContext(question);
+    const selectedNeed = needs.find((need) => need.key.toLowerCase() === evidenceKey);
+    if (!selectedNeed || selectedNeed.evidence_type !== "language_score") return false;
+    setGapTurns((current) => [...current, {
+      question: question.prompt || question.question,
+      answer: option.label,
+    }]);
+    setSelectedLanguageTest({
+      questionId: question.question_id,
+      evidenceKey,
+      label: option.label,
+    });
+    setGapSelectedOptions([]);
+    setGapStructuredValues({});
+    setGapOtherMode(false);
+    setGapFollowUpQuestion("");
+    setGapFollowUpSlots([]);
+    setGapFollowUpQuestionId("");
+    return true;
+  }
+
+  function languageScoreFormQuestion(
+    parentQuestion: GapQuestion,
+    selection: SelectedLanguageTest,
+  ): { question: GapQuestion; need: GapEvidenceNeed; prompt: string } | null {
+    const { needs } = currentGapEvidenceContext(parentQuestion);
+    const need = needs.find((item) => item.key.toLowerCase() === selection.evidenceKey);
+    if (!need || need.evidence_type !== "language_score") return null;
+    const standardPaths = selection.evidenceKey === "ielts"
+      ? ["score", "listening", "reading", "writing", "speaking"]
+      : ["score", "reading", "listening", "speaking", "writing"];
+    const existing = userEvidence.find((item) => (
+      item.key.toLowerCase() === selection.evidenceKey
+      && item.availability === "known"
+    ));
+    const existingValue = existing?.value && typeof existing.value === "object"
+      ? existing.value as Record<string, unknown>
+      : {};
+    const existingSubscores = existingValue.subscores && typeof existingValue.subscores === "object"
+      ? existingValue.subscores as Record<string, unknown>
+      : {};
+    const paths = standardPaths.filter((path) => (
+      path === "score"
+        ? existingValue.score == null
+        : existingSubscores[path] == null
+    ));
+    const labels: Record<string, string> = {
+      score: "Overall / Total",
+      listening: "Listening",
+      reading: "Reading",
+      writing: "Writing",
+      speaking: "Speaking",
+    };
+    const thresholdLabel = (path: string) => {
+      const threshold = path === "score" ? need.minimum : need.component_minimum;
+      return threshold == null ? "" : `（项目要求 ≥ ${threshold}）`;
+    };
+    const prompt = `请填写你的 ${selection.label} 成绩。`;
+    return {
+      need,
+      prompt,
+      question: {
+        ...parentQuestion,
+        question: prompt,
+        prompt,
+        evidence_keys: [need.key],
+        expected_evidence_keys: [need.key],
+        allowed_evidence_keys: [need.key],
+        control_type: "number_group",
+        options: [],
+        fields: paths.map((path) => ({
+          field_id: `${selection.evidenceKey}-${path}`,
+          label: `${labels[path]}${thresholdLabel(path)}`,
+          evidence_key: need.key,
+          value_path: path,
+          required: true,
+          placeholder: null,
+        })),
+        validation: {
+          required: true,
+          minimum: null,
+          maximum: null,
+          step: null,
+          min_selections: null,
+          max_selections: null,
+        },
+        allow_unknown: true,
+        allow_negative: true,
+        allow_other: false,
+        schema_status: "valid",
+        schema_error_code: null,
+      },
+    };
+  }
+
+  function displayedGapQuestion(question: GapQuestion): string {
+    if (selectedLanguageTest?.questionId === question.question_id) {
+      return `请填写你的 ${selectedLanguageTest.label} 成绩。`;
+    }
+    return gapFollowUpQuestionId === question.question_id && gapFollowUpQuestion
+      ? gapFollowUpQuestion
+      : question.question;
+  }
+
+  function renderStructuredGapControl(question: GapQuestion) {
+    const allowedEvidenceKeys = (question.allowed_evidence_keys ?? []).length > 0
+      ? question.allowed_evidence_keys
+      : question.expected_evidence_keys;
+    const hasActiveFollowUp = gapFollowUpQuestionId === question.question_id && gapFollowUpSlots.length > 0;
+    const activeEvidenceKeys = hasActiveFollowUp
+      ? allowedEvidenceKeys.filter((key) => gapFollowUpSlots.some((slot) => slot.startsWith(`${key}.`)))
+      : question.expected_evidence_keys;
+    const visibleFields = hasActiveFollowUp
+      ? question.fields.filter((field) => gapFollowUpSlots.includes(`${field.evidence_key}.${field.value_path}`))
+      : question.fields;
+    const visibleOptions = question.options.filter((option) => !option.evidence_key || activeEvidenceKeys.includes(option.evidence_key));
+    const structuredDisabled = isParsingGapAnswer || isAnalyzingGap;
+    const activeLanguageForm = selectedLanguageTest?.questionId === question.question_id
+      ? languageScoreFormQuestion(question, selectedLanguageTest)
+      : null;
+    if (activeLanguageForm) {
+      const scoreQuestion = activeLanguageForm.question;
+      const completed = scoreQuestion.fields.every((field) => (
+        gapStructuredValues[field.field_id] !== undefined
+        && gapStructuredValues[field.field_id] !== ""
+      ));
+      const summary = scoreQuestion.fields
+        .filter((field) => gapStructuredValues[field.field_id] !== undefined)
+        .map((field) => `${field.label}: ${String(gapStructuredValues[field.field_id])}`)
+        .join("；");
+      return <div className={styles.structuredComposer}>
+        <div className={styles.structuredFields}>{scoreQuestion.fields.map((field) => <label key={field.field_id}><span>{field.label}</span><input type="number" step="any" value={String(gapStructuredValues[field.field_id] ?? "")} disabled={structuredDisabled} onChange={(event) => setGapStructuredValues((current) => { const next = { ...current }; if (!event.target.value) delete next[field.field_id]; else next[field.field_id] = Number(event.target.value); return next; })} /></label>)}</div>
+        <button type="button" className={styles.structuredSubmit} disabled={!completed || structuredDisabled} onClick={() => void submitStructuredGapAnswer({ values: gapStructuredValues }, summary, scoreQuestion, activeLanguageForm.prompt)}>提交成绩</button>
+        <div className={styles.gapQuickAnswers}>
+          <button type="button" disabled={structuredDisabled} onClick={() => void submitStructuredGapAnswer({ terminal_state: "known_negative" }, "暂时没有", scoreQuestion, activeLanguageForm.prompt)}>暂时没有</button>
+          <button type="button" disabled={structuredDisabled} onClick={() => void submitStructuredGapAnswer({ terminal_state: "unknown" }, "不确定", scoreQuestion, activeLanguageForm.prompt)}>不确定</button>
+        </div>
+      </div>;
+    }
+    const answerSummary = () => {
+      if (question.control_type === "single_select" || question.control_type === "multi_select") {
+        return visibleOptions.filter((option) => gapSelectedOptions.includes(option.value)).map((option) => option.label).join("；");
+      }
+      return visibleFields
+        .filter((field) => gapStructuredValues[field.field_id] !== undefined && gapStructuredValues[field.field_id] !== "")
+        .map((field) => `${field.label}: ${String(gapStructuredValues[field.field_id])}`)
+        .join("；");
+    };
+
+    const hasVisibleStructuredPath = question.control_type === "single_select" || question.control_type === "multi_select"
+      ? visibleOptions.length > 0
+      : visibleFields.length > 0;
+    if (question.schema_status !== "valid" || question.control_type === "text_fallback" || hasActiveFollowUp && !hasVisibleStructuredPath) {
+      return <div className={`${styles.discoveryNotice} ${styles.discoveryError}`}><p>这个问题暂时无法生成，请重新尝试。</p><button type="button" disabled={isRepairingGapQuestion} onClick={() => void regenerateGapQuestion(question)}>{isRepairingGapQuestion ? "正在重新生成…" : "重新生成问题"}</button></div>;
+    }
+
+    if (gapOtherMode) {
+      return <form className={styles.composer} onSubmit={(event) => { event.preventDefault(); void submitGapAnswer(gapInput); }}>
+        <label htmlFor="gap-answer">你的回答</label>
+        <div className={styles.inputShell}><textarea id="gap-answer" rows={2} value={gapInput} disabled={structuredDisabled} onChange={(event) => setGapInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submitGapAnswer(gapInput); } }} placeholder="可以直接回答，也可以说不知道、不记得或暂时没有" /><button type="submit" disabled={!gapInput.trim() || structuredDisabled} aria-label="发送回答">↑</button></div>
+        <div className={styles.gapQuickAnswers}><button type="button" onClick={() => void submitGapAnswer("不知道，暂时无法提供")}>不知道</button><button type="button" onClick={() => void submitGapAnswer("暂时没有")}>暂时没有</button></div>
+      </form>;
+    }
+
+    return <div className={styles.structuredComposer}>
+      {question.control_type === "experience_form" && (() => {
+        const typeOptions = visibleOptions.filter((option) => option.value.startsWith("experience:"));
+        const unitOptions = visibleOptions.filter((option) => option.value.startsWith("unit:"));
+        const noneSelected = gapSelectedOptions.includes("experience:none");
+        const selectedTypes = gapSelectedOptions.filter((value) => value.startsWith("experience:") && value !== "experience:none");
+        const selectedUnit = gapSelectedOptions.find((value) => value.startsWith("unit:"));
+        const needsDuration = visibleFields.some((field) => field.field_id === "experience-duration");
+        const typeComplete = typeOptions.length === 0 || noneSelected || selectedTypes.length > 0;
+        const durationComplete = noneSelected || !needsDuration || (
+          gapStructuredValues["experience-duration"] !== undefined && Boolean(selectedUnit)
+        );
+        const toggleType = (value: string) => {
+          if (value === "experience:none") {
+            setGapSelectedOptions([value]);
+            setGapStructuredValues((current) => {
+              const next = { ...current };
+              delete next["experience-duration"];
+              return next;
+            });
+            return;
+          }
+          setGapSelectedOptions((current) => {
+            const withoutNone = current.filter((item) => item !== "experience:none");
+            return withoutNone.includes(value)
+              ? withoutNone.filter((item) => item !== value)
+              : [...withoutNone, value];
+          });
+        };
+        const chooseUnit = (value: string) => setGapSelectedOptions((current) => [
+          ...current.filter((item) => !item.startsWith("unit:") && item !== "experience:none"),
+          value,
+        ]);
+        const summary = [
+          ...typeOptions.filter((option) => gapSelectedOptions.includes(option.value)).map((option) => option.label),
+          ...(noneSelected ? [] : unitOptions.filter((option) => gapSelectedOptions.includes(option.value)).map((option) => option.label)),
+          ...(noneSelected || gapStructuredValues["experience-duration"] === undefined ? [] : [`累计 ${String(gapStructuredValues["experience-duration"])}`]),
+        ].join("；");
+        return <>
+          {typeOptions.length > 0 && <div className={styles.structuredOptions}>{typeOptions.map((option) => {
+            const selected = gapSelectedOptions.includes(option.value);
+            return <button type="button" key={option.value} className={selected ? styles.selectedStructuredOption : ""} disabled={structuredDisabled} onClick={() => toggleType(option.value)}>{selected ? "✓ " : ""}{option.label}</button>;
+          })}</div>}
+          {!noneSelected && needsDuration && <>
+            <div className={styles.structuredFields}><label><span>累计时长</span><input type="number" min={0} step="any" value={String(gapStructuredValues["experience-duration"] ?? "")} disabled={structuredDisabled} onChange={(event) => setGapStructuredValues((current) => { const next = { ...current }; if (!event.target.value) delete next["experience-duration"]; else next["experience-duration"] = Number(event.target.value); return next; })} /></label></div>
+            <div className={styles.structuredOptions}>{unitOptions.map((option) => {
+              const selected = gapSelectedOptions.includes(option.value);
+              return <button type="button" key={option.value} className={selected ? styles.selectedStructuredOption : ""} disabled={structuredDisabled} onClick={() => chooseUnit(option.value)}>{selected ? "✓ " : ""}{option.label}</button>;
+            })}</div>
+          </>}
+          <button type="button" className={styles.structuredSubmit} disabled={!typeComplete || !durationComplete || structuredDisabled} onClick={() => void submitStructuredGapAnswer({ selected_options: gapSelectedOptions, values: gapStructuredValues }, summary)}>提交</button>
+        </>;
+      })()}
+      {question.control_type === "boolean_group" && <>
+        <div className={styles.structuredFields}>{visibleFields.map((field) => {
+          const value = gapStructuredValues[field.field_id];
+          return <div key={field.field_id}>
+            <span>{field.label}</span>
+            <div className={styles.structuredOptions}>
+              <button type="button" className={value === true ? styles.selectedStructuredOption : ""} disabled={structuredDisabled} onClick={() => setGapStructuredValues((current) => ({ ...current, [field.field_id]: true }))}>{value === true ? "✓ " : ""}有</button>
+              <button type="button" className={value === false ? styles.selectedStructuredOption : ""} disabled={structuredDisabled} onClick={() => setGapStructuredValues((current) => ({ ...current, [field.field_id]: false }))}>{value === false ? "✓ " : ""}没有</button>
+            </div>
+          </div>;
+        })}</div>
+        <button type="button" className={styles.structuredSubmit} disabled={Object.keys(gapStructuredValues).length === 0 || structuredDisabled} onClick={() => void submitStructuredGapAnswer({ values: gapStructuredValues }, answerSummary())}>提交</button>
+      </>}
+      {question.control_type === "boolean" && <div className={styles.structuredOptions}>
+        <button type="button" disabled={structuredDisabled} onClick={() => { const field = visibleFields[0]; if (field) void submitStructuredGapAnswer({ values: { [field.field_id]: true } }, "有"); }}>有 / 是</button>
+        <button type="button" disabled={structuredDisabled} onClick={() => { const field = visibleFields[0]; if (field) void submitStructuredGapAnswer({ values: { [field.field_id]: false } }, "没有 / 否"); }}>没有 / 否</button>
+      </div>}
+      {(question.control_type === "single_select" || question.control_type === "multi_select") && <>
+        <div className={styles.structuredOptions}>{visibleOptions.map((option) => {
+          const selected = gapSelectedOptions.includes(option.value);
+          return <button type="button" key={option.value} className={selected ? styles.selectedStructuredOption : ""} disabled={structuredDisabled} onClick={() => setGapSelectedOptions((current) => question.control_type === "single_select" ? [option.value] : selected ? current.filter((value) => value !== option.value) : [...current, option.value])}>{selected ? "✓ " : ""}{option.label}</button>;
+        })}</div>
+        <button type="button" className={styles.structuredSubmit} disabled={gapSelectedOptions.length === 0 || structuredDisabled} onClick={() => {
+          const selectedOption = visibleOptions.find((option) => gapSelectedOptions.includes(option.value));
+          if (question.control_type === "single_select" && selectedOption && beginLanguageScoreForm(question, selectedOption)) return;
+          void submitStructuredGapAnswer({ selected_options: gapSelectedOptions }, answerSummary());
+        }}>提交</button>
+      </>}
+      {(question.control_type === "number" || question.control_type === "number_group" || question.control_type === "date") && <>
+        <div className={styles.structuredFields}>{visibleFields.map((field) => <label key={field.field_id}><span>{field.label}</span><input type={question.control_type === "date" ? "date" : "number"} min={question.validation.minimum ?? undefined} max={question.validation.maximum ?? undefined} step={question.validation.step ?? "any"} placeholder={field.placeholder ?? undefined} value={String(gapStructuredValues[field.field_id] ?? "")} disabled={structuredDisabled} onChange={(event) => setGapStructuredValues((current) => { const next = { ...current }; if (!event.target.value) delete next[field.field_id]; else next[field.field_id] = question.control_type === "date" ? event.target.value : Number(event.target.value); return next; })} /></label>)}</div>
+        <button type="button" className={styles.structuredSubmit} disabled={Object.keys(gapStructuredValues).length === 0 || structuredDisabled} onClick={() => void submitStructuredGapAnswer({ values: gapStructuredValues }, answerSummary())}>提交</button>
+      </>}
+      {question.control_type === "short_text" && <>
+        <div className={styles.structuredFields}>{visibleFields.map((field) => <label key={field.field_id}><span>{field.label}</span><input type="text" maxLength={200} placeholder={field.placeholder ?? undefined} value={String(gapStructuredValues[field.field_id] ?? "")} disabled={structuredDisabled} onChange={(event) => setGapStructuredValues((current) => { const next = { ...current }; const value = event.target.value; if (!value) delete next[field.field_id]; else next[field.field_id] = value; return next; })} /></label>)}</div>
+        <button type="button" className={styles.structuredSubmit} disabled={Object.keys(gapStructuredValues).length === 0 || structuredDisabled} onClick={() => void submitStructuredGapAnswer({ values: gapStructuredValues }, answerSummary())}>提交</button>
+      </>}
+      <div className={styles.gapQuickAnswers}>
+        {question.allow_unknown && <button type="button" disabled={structuredDisabled} onClick={() => void submitStructuredGapAnswer({ terminal_state: "unknown" }, "不确定 / 不记得")}>不确定 / 不记得</button>}
+        {question.allow_negative && <button type="button" disabled={structuredDisabled} onClick={() => void submitStructuredGapAnswer({ terminal_state: "known_negative" }, "暂时没有")}>暂时没有</button>}
+        {question.allow_other && <button type="button" disabled={structuredDisabled} onClick={() => setGapOtherMode(true)}>其他 / 补充说明</button>}
+      </div>
+    </div>;
   }
 
   async function requestTargetProgramConfirmation(
@@ -729,28 +1215,29 @@ export default function Home() {
     }
   }, []);
 
-  async function mapQsSubject() {
-    const major = targetMajor.trim();
-    if (!major || isMappingSubject) return;
-    setIsMappingSubject(true);
-    setSubjectMappingError("");
-    setSubjectCandidates([]);
-    setSelectedSubject("");
-    try {
-      const response = await fetch(`${API_BASE_URL}/rankings/qs/map-subject`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target_major: major }),
+  useEffect(() => {
+    if (targetStep !== "explore" || rankingBasis !== "subject" || qsSubjects.length > 0) return;
+    let cancelled = false;
+    setIsLoadingSubjects(true);
+    setSubjectListError("");
+    void fetch(`${API_BASE_URL}/rankings/qs/subjects`)
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail ?? "QS 学科列表加载失败");
+        if (!cancelled) setQsSubjects((data as QSSubjectListResponse).subjects);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setSubjectListError(error instanceof Error ? error.message : "QS 学科列表加载失败");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingSubjects(false);
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail ?? "QS 学科匹配失败");
-      setSubjectCandidates((data as SubjectMappingResponse).candidates);
-    } catch (error) {
-      setSubjectMappingError(error instanceof Error ? error.message : "QS 学科匹配失败");
-    } finally {
-      setIsMappingSubject(false);
-    }
-  }
+    return () => {
+      cancelled = true;
+    };
+  }, [qsSubjects.length, rankingBasis, targetStep]);
 
   async function discoverPrograms(scope: ExploreTarget, candidateUniversity: CandidateUniversity) {
     const key = candidateUniversity.university;
@@ -787,17 +1274,20 @@ export default function Home() {
     const minimum = Number(rankingMin);
     const maximum = Number(rankingMax);
     if (!minimum || !maximum || minimum > maximum) return;
-    if (rankingBasis === "subject" && !selectedSubject) {
+    if (rankingBasis === "subject" && !selectedSubject && !subjectUncertain) {
       setCandidateUniversities([]);
       return;
     }
+
+    const useSubjectRanking = rankingBasis === "subject" && Boolean(selectedSubject);
 
     const nextTarget: ExploreTarget = {
       mode: "explore",
       countries,
       target_major: targetMajor.trim(),
-      ranking: { type: "QS", basis: rankingBasis, min: minimum, max: maximum },
-      ranking_subject: rankingBasis === "subject" ? selectedSubject : null,
+      ranking: { type: "QS", basis: useSubjectRanking ? "subject" : "overall", min: minimum, max: maximum },
+      ranking_subject_id: useSubjectRanking ? selectedSubjectId : null,
+      ranking_subject: useSubjectRanking ? selectedSubject : null,
       additional_preferences: additionalPreferences.trim(),
     };
     const timer = window.setTimeout(() => {
@@ -805,7 +1295,7 @@ export default function Home() {
       void discoverUniversities(nextTarget);
     }, 180);
     return () => window.clearTimeout(timer);
-  }, [additionalPreferences, countries, discoverUniversities, rankingBasis, rankingMax, rankingMin, selectedSubject, targetMajor, targetStep]);
+  }, [additionalPreferences, countries, discoverUniversities, rankingBasis, rankingMax, rankingMin, selectedSubject, selectedSubjectId, subjectUncertain, targetMajor, targetStep]);
 
   if (showProfile && targetStep) {
     return (
@@ -820,13 +1310,14 @@ export default function Home() {
             <div className={styles.exploreWorkspace}>
               <section className={`${styles.targetForm} ${styles.exploreFilters}`}>
                 <fieldset><legend>目标国家 / 地区 <small>可多选</small></legend><div className={styles.chipGrid}>{COUNTRY_OPTIONS.map((country) => <button key={country} type="button" className={countries.includes(country) ? styles.selectedChip : ""} onClick={() => toggleCountry(country)}>{countries.includes(country) ? "✓ " : "+ "}{country}</button>)}</div>{!countries.length && <span className={styles.fieldHint}>未选择时显示全球院校</span>}</fieldset>
-                <div className={styles.filterRow}><label><span>目标专业</span><input value={targetMajor} onChange={(event) => { setTargetMajor(event.target.value); setSubjectCandidates([]); setSelectedSubject(""); setSubjectMappingError(""); setCandidateUniversities([]); }} placeholder="例如：人工智能、计算机科学" /></label><label><span>榜单类型</span><input value="QS World University Rankings" readOnly aria-readonly="true" /></label></div>
-                <fieldset className={styles.rankingBasis}><legend>QS 排名依据</legend><div><button type="button" className={rankingBasis === "overall" ? styles.selectedBasis : ""} onClick={() => { setRankingBasis("overall"); setCandidateUniversities([]); setDiscoveryError(""); }}><strong>按学校综合排名筛选</strong><span>QS World University Rankings · 2027</span><small>看整所大学的综合实力</small></button><button type="button" className={rankingBasis === "subject" ? styles.selectedBasis : ""} onClick={() => { setRankingBasis("subject"); setCandidateUniversities([]); setDiscoveryError(""); }}><strong>按目标学科排名筛选</strong><span>QS World University Rankings by Subject · 2026</span><small>看目标专业对应学科的实力</small></button></div>{rankingBasis === "subject" && selectedSubject && <p className={styles.currentRankingSubject}><span>当前 QS Subject</span><strong>{selectedSubject}</strong></p>}</fieldset>
+                <div className={styles.filterRow}><label><span>目标专业</span><input value={targetMajor} onChange={(event) => { setTargetMajor(event.target.value); setCandidateUniversities([]); }} placeholder="例如：人工智能、计算机科学" /></label><label><span>榜单类型</span><input value="QS World University Rankings" readOnly aria-readonly="true" /></label></div>
+                <fieldset className={styles.rankingBasis}><legend>QS 排名依据</legend><div><button type="button" className={rankingBasis === "overall" ? styles.selectedBasis : ""} onClick={() => { setRankingBasis("overall"); setCandidateUniversities([]); setDiscoveryError(""); }}><strong>按学校综合排名筛选</strong><span>QS World University Rankings · 2027</span><small>看整所大学的综合实力</small></button><button type="button" className={rankingBasis === "subject" ? styles.selectedBasis : ""} onClick={() => { setRankingBasis("subject"); setSubjectUncertain(false); setCandidateUniversities([]); setDiscoveryError(""); }}><strong>按目标学科排名筛选</strong><span>QS World University Rankings by Subject · 2026</span><small>直接选择 QS 官方学科分类</small></button></div>{rankingBasis === "subject" && (selectedSubject || subjectUncertain) && <p className={styles.currentRankingSubject}><span>当前 QS Subject</span><strong>{subjectUncertain ? "暂不确定 · 当前按综合排名筛选" : selectedSubject}</strong></p>}</fieldset>
                 {rankingBasis === "subject" && <div className={styles.subjectMapper}>
-                  <div><span>目标专业 → QS Subject</span><p>由 DeepSeek 仅从本地 60 个官方 Subject 中推荐；确认后筛选只查询本地数据库。</p></div>
-                  <button type="button" onClick={() => void mapQsSubject()} disabled={!targetMajor.trim() || isMappingSubject}>{isMappingSubject ? "正在匹配…" : subjectCandidates.length ? "重新匹配" : "匹配 QS 学科"}</button>
-                  {subjectCandidates.length > 0 && <div className={styles.subjectCandidates}>{subjectCandidates.map((subject) => <button type="button" key={subject} className={selectedSubject === subject ? styles.selectedSubject : ""} onClick={() => { setSelectedSubject(subject); setSubjectMappingError(""); }}>{selectedSubject === subject ? "✓ " : ""}{subject}</button>)}</div>}
-                  {subjectMappingError && <p className={styles.subjectError}>{subjectMappingError}</p>}
+                  <div><span>选择 QS Subject</span><p>选项直接来自后端当前支持的 QS 学科列表；选择后仅查询本地 QS 数据。</p></div>
+                  <label className={styles.subjectCombobox}><span>搜索或选择学科</span><input list="qs-subject-options" value={subjectSearch} onChange={(event) => { const value = event.target.value; const match = qsSubjects.find((subject) => subject.subject_name === value); setSubjectSearch(value); setSelectedSubject(match?.subject_name ?? ""); setSelectedSubjectId(match?.subject_id ?? ""); setSubjectUncertain(false); setCandidateUniversities([]); }} placeholder={isLoadingSubjects ? "正在加载 QS 学科…" : "输入关键词，例如 Computer Science"} disabled={isLoadingSubjects} /><datalist id="qs-subject-options">{qsSubjects.map((subject) => <option key={subject.subject_id} value={subject.subject_name} />)}</datalist></label>
+                  <button type="button" onClick={() => { setSubjectUncertain(true); setSubjectSearch(""); setSelectedSubject(""); setSelectedSubjectId(""); setCandidateUniversities([]); }}>暂不确定</button>
+                  {subjectSearch && !selectedSubject && !subjectUncertain && <p className={styles.subjectHint}>请从下拉列表中选择一个完整的 QS Subject。</p>}
+                  {subjectListError && <p className={styles.subjectError}>{subjectListError}</p>}
                 </div>}
                 <div className={styles.filterRow}><label><span>QS 排名从</span><input type="number" min="1" value={rankingMin} onChange={(event) => setRankingMin(event.target.value)} placeholder="1" /></label><label><span>QS 排名到</span><input type="number" min="1" value={rankingMax} onChange={(event) => setRankingMax(event.target.value)} placeholder="100" /></label></div>
                 <label><span>其他偏好 <small>可选</small></span><textarea rows={4} value={additionalPreferences} onChange={(event) => setAdditionalPreferences(event.target.value)} placeholder="例如：偏好大城市、希望有实习机会、预算范围……" /></label>
@@ -885,7 +1376,7 @@ export default function Home() {
           </div>}
 
           {targetStep === "requirements" && activeTargetProgram && <div className={styles.requirementsReview}>
-            <div className={styles.requirementsHeading}><div><p className={styles.eyebrow}>REQUIREMENTS REVIEW</p><h1>目标项目申请要求</h1><p>AI 根据公开网页整理，仅供参考；最终申请要求以院校最新官方信息为准。</p></div><div className={styles.requirementsHeadingActions}><button type="button" onClick={() => setTargetStep("explore")}>← 返回院校筛选</button><a href={activeTargetProgram.official_program_url} target="_blank" rel="noopener noreferrer">查看项目官网 ↗</a></div></div>
+            <div className={styles.requirementsHeading}><div><p className={styles.eyebrow}>REQUIREMENTS REVIEW</p><h1>目标项目申请要求</h1><p>AI 根据公开网页整理，仅供参考；最终申请要求以院校最新官方信息为准。</p>{requirementsReview?.checked_at && <p>申请信息最后获取：{requirementsReview.checked_at.slice(0, 10)}</p>}</div><div className={styles.requirementsHeadingActions}><button type="button" onClick={() => setTargetStep("explore")}>← 返回院校筛选</button><button type="button" onClick={() => { void retrieveRequirements(activeTargetProgram, true); void retrieveTimeline(activeTargetProgram, true); }} disabled={isLoadingRequirements || isLoadingTimeline}>重新获取最新信息</button><a href={activeTargetProgram.official_program_url} target="_blank" rel="noopener noreferrer">查看项目官网 ↗</a></div></div>
             <div className={styles.activeTargetCard}><span>已选择目标项目</span><strong>{activeTargetProgram.university}</strong><h2>{activeTargetProgram.program}</h2></div>
             {isLoadingTimeline && <div className={styles.timelineCard}><div className={styles.timelineHeading}><div><span>APPLICATION TIMELINE</span><h2>正在检索官方申请时间…</h2></div></div></div>}
             {!isLoadingTimeline && timelineError && <div className={`${styles.discoveryNotice} ${styles.discoveryError}`}><p>{timelineError}</p><button type="button" onClick={() => void retrieveTimeline(activeTargetProgram)}>重新获取时间线</button></div>}
@@ -925,22 +1416,18 @@ export default function Home() {
             <div className={styles.gapChat}>
               <div className={styles.messages} aria-live="polite">
                 {gapTurns.map((turn, index) => <div key={`${turn.question}-${index}`}><div className={styles.assistantRow}><div className={styles.miniAvatar}>知</div><p>{turn.question}</p></div><div className={styles.userRow}><p>{turn.answer}</p></div></div>)}
-                {!isAnalyzingGap && gapPlan.questions[gapQuestionIndex] && <div className={styles.assistantRow}><div className={styles.miniAvatar}>知</div><p>{gapFollowUpQuestion || gapPlan.questions[gapQuestionIndex].question}</p></div>}
+                {!isAnalyzingGap && gapPlan.questions[gapQuestionIndex] && <div className={styles.assistantRow}><div className={styles.miniAvatar}>知</div><p>{displayedGapQuestion(gapPlan.questions[gapQuestionIndex])}</p></div>}
                 {isAnalyzingGap && <div className={`${styles.assistantRow} ${styles.thinkingRow}`}><div className={styles.miniAvatar}>知</div><p><span>●</span><span>●</span><span>●</span> 正在生成 Gap Table</p></div>}
                 {gapError && <div className={styles.inlineError}>{gapError}</div>}
               </div>
-              <form className={styles.composer} onSubmit={(event) => { event.preventDefault(); void submitGapAnswer(gapInput); }}>
-                <label htmlFor="gap-answer">你的回答</label>
-                <div className={styles.inputShell}><textarea id="gap-answer" rows={2} value={gapInput} disabled={isParsingGapAnswer || isAnalyzingGap} onChange={(event) => setGapInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submitGapAnswer(gapInput); } }} placeholder="可以直接回答，也可以说不知道、不记得或暂时没有" /><button type="submit" disabled={!gapInput.trim() || isParsingGapAnswer || isAnalyzingGap} aria-label="发送回答">↑</button></div>
-                <div className={styles.gapQuickAnswers}><button type="button" onClick={() => void submitGapAnswer("不知道，暂时无法提供")}>不知道</button><button type="button" onClick={() => void submitGapAnswer("暂时没有")}>暂时没有</button></div>
-              </form>
+              {gapPlan.questions[gapQuestionIndex] && renderStructuredGapControl(gapPlan.questions[gapQuestionIndex])}
             </div>
           </div>}
 
           {targetStep === "gap_results" && activeTargetProgram && gapAnalysis && <div className={styles.gapResultsStage}>
             <div className={styles.gapResultsHeading}><div><p className={styles.eyebrow}>GAP TABLE</p><h1>申请匹配结果</h1><p>{activeTargetProgram.university} · {activeTargetProgram.program}</p></div><button type="button" className={styles.backButton} onClick={() => setTargetStep("requirements")}>返回查看申请要求</button></div>
             <div className={styles.gapSummary}>{(["met", "partial", "not_met", "unknown"] as GapStatus[]).map((status) => <div key={status}><span>{status === "met" ? "满足" : status === "partial" ? "部分满足" : status === "not_met" ? "未满足" : "信息不足"}</span><strong>{gapAnalysis.results.filter((item) => item.status === status).length}</strong></div>)}</div>
-            <div className={styles.gapTableWrap}><table className={styles.gapTable}><thead><tr><th>目标要求</th><th>类型</th><th>匹配状态</th><th>用户证据</th><th>差距</th><th>来源</th></tr></thead><tbody>{gapAnalysis.results.map((result) => <tr key={result.requirement_id}><td><strong>{result.requirement}</strong>{result.requirement_zh && <span className={styles.gapRequirementTranslation}>{result.requirement_zh}</span>}<small>{result.reason}</small></td><td>{REQUIREMENT_CATEGORIES.find((item) => item.id === result.category)?.label ?? result.category}</td><td><span className={result.status === "met" ? styles.gapStatusMet : result.status === "partial" ? styles.gapStatusPartial : result.status === "not_met" ? styles.gapStatusNotMet : styles.gapStatusUnknown}>{result.status === "met" ? "满足" : result.status === "partial" ? "部分满足" : result.status === "not_met" ? "未满足" : "信息不足"}</span></td><td>{result.user_evidence}</td><td>{result.gap}</td><td><div>{result.requirement_verification_status === "user_supplied" ? "用户补充要求" : result.requirement_verification_status === "model_memory_unverified" ? "AI 参考 · 当前未确认官方来源" : result.source_url ? <a href={result.source_url} target="_blank" rel="noopener noreferrer">官网来源 ↗</a> : "AI 检索自官网"}</div><small>{TEMPORAL_APPLICABILITY_LABELS[result.temporal_applicability]}{result.source_cycle ? ` · ${result.source_cycle}` : ""}{result.temporal_note ? `：${result.temporal_note}` : ""}</small></td></tr>)}</tbody></table></div>
+            <div className={styles.gapTableWrap}><table className={styles.gapTable}><thead><tr><th>目标要求</th><th>类型</th><th>匹配状态</th><th>用户证据</th><th>差距</th><th>来源</th></tr></thead><tbody>{gapAnalysis.results.map((result) => <tr key={result.requirement_id}><td><strong>{result.requirement}</strong>{result.requirement_zh && <span className={styles.gapRequirementTranslation}>{result.requirement_zh}</span>}<small>{result.reason}</small></td><td>{REQUIREMENT_CATEGORIES.find((item) => item.id === result.category)?.label ?? result.category}</td><td><span className={result.status === "met" ? styles.gapStatusMet : result.status === "partial" ? styles.gapStatusPartial : result.status === "not_met" ? styles.gapStatusNotMet : styles.gapStatusUnknown}>{gapStatusLabel(result)}</span></td><td>{result.user_evidence}</td><td>{result.gap}</td><td><div>{result.requirement_verification_status === "user_supplied" ? "用户补充要求" : result.requirement_verification_status === "model_memory_unverified" ? "AI 参考 · 当前未确认官方来源" : result.source_url ? <a href={result.source_url} target="_blank" rel="noopener noreferrer">官网来源 ↗</a> : "AI 检索自官网"}</div><small>{TEMPORAL_APPLICABILITY_LABELS[result.temporal_applicability]}{result.source_cycle ? ` · ${result.source_cycle}` : ""}{result.temporal_note ? `：${result.temporal_note}` : ""}</small></td></tr>)}</tbody></table></div>
             {gapAnalysis.informational_requirements.length > 0 && <div className={styles.informationalRequirements}><strong>以下为信息型要求，不参与匹配判断</strong>{gapAnalysis.informational_requirements.map((item) => <p key={item.requirement_id}>{item.requirement}</p>)}</div>}
             <div className={styles.planningLaunch}><div><strong>生成统一申请时间轴</strong><p>将 Gap Table、官方 Timeline 和当前日期合并为申请级行动计划。</p></div><button type="button" className={styles.primaryAction} onClick={() => void generateActionPlan()} disabled={isPlanningActions}>{isPlanningActions ? "正在生成行动计划…" : "生成 Action Plan"} <span>→</span></button></div>
             {actionPlanError && <div className={`${styles.discoveryNotice} ${styles.discoveryError}`}>{actionPlanError}</div>}

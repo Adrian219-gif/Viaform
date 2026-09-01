@@ -134,8 +134,17 @@ async def check_ai_reference_interview() -> None:
         "questions": [
             {
                 "question_id": "q:language:0",
-                "question": "你目前有 IELTS 成绩吗？",
-                "evidence_keys": ["ielts"],
+                "prompt": "你目前的 IELTS 成绩是多少？",
+                "expected_evidence_keys": ["ielts"],
+                "control_type": "number",
+                "fields": [
+                    {
+                        "field_id": "ielts-score",
+                        "label": "IELTS 成绩",
+                        "evidence_key": "ielts",
+                        "value_path": "score",
+                    }
+                ],
             }
         ],
     }

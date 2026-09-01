@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
@@ -13,15 +14,25 @@ from difflib import SequenceMatcher
 from functools import partial
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Type, TypeVar, get_args
+from typing import Any, Dict, List, Literal, Optional, Set, Type, TypeVar, get_args
 from urllib.parse import urljoin, urlparse
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI, OpenAIError
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+
+from .programme_cache import (
+    CacheSource,
+    ProgrammePoolRecord,
+    ProgrammeCache,
+    normalized_programme_identity,
+    programme_cache_key,
+    programme_semantic_cache_key,
+    university_cache_key,
+)
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BACKEND_DIR / ".env")
@@ -36,9 +47,15 @@ OFFICIAL_PROGRAM_PAGE_TIMEOUT_SECONDS = 30.0
 OFFICIAL_PROGRAM_PAGE_MAX_CHARS = 120_000
 OFFICIAL_PROGRAM_PAGE_MAX_REDIRECTS = 3
 SCHOOL_URL_BATCH_SIZE = 12
+PROGRAMME_CACHE = ProgrammeCache(
+    runtime_db=BACKEND_DIR / "data" / "runtime" / "programme_cache.sqlite",
+    seed_dir=BACKEND_DIR / "data" / "seed" / "programme_cache",
+)
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_MODEL = "deepseek-v4-flash"
+GAP_PLANNER_INITIAL_MAX_OUTPUT_TOKENS = 10_000
+GAP_PLANNER_RETRY_MAX_OUTPUT_TOKENS = 12_000
 
 logger = logging.getLogger(__name__)
 
@@ -138,17 +155,9 @@ class ExploreTargetRequest(BaseModel):
     countries: List[str] = Field(default_factory=list)
     target_major: str = ""
     ranking: RankingScope
+    ranking_subject_id: Optional[str] = None
     ranking_subject: Optional[str] = None
     additional_preferences: str = ""
-
-
-class QSSubjectMappingRequest(BaseModel):
-    target_major: str = Field(min_length=1)
-
-
-class QSSubjectMappingResult(BaseModel):
-    target_major: str
-    candidates: List[str] = Field(default_factory=list)
 
 
 class RankedUniversity(BaseModel):
@@ -182,6 +191,8 @@ class CandidateProgram(BaseModel):
 
 class CandidateProgramResult(BaseModel):
     candidates: List[CandidateProgram] = Field(default_factory=list)
+    cache_source: Literal["live", "programme_pool"] = "live"
+    refresh_scheduled: bool = False
 
 
 class WebSearchProgramCandidate(BaseModel):
@@ -348,11 +359,27 @@ class TargetProgramRequirementsReview(BaseModel):
     target_program: TargetProgram
     checked_at: str
     categories: List[RequirementCategoryReview]
+    cache_source: CacheSource = "live"
 
 
 EvidenceAvailability = Literal["known", "known_negative", "unknown"]
 EvidenceSlotStatus = Literal["known", "known_negative", "unknown", "missing"]
 GapStatus = Literal["met", "partial", "not_met", "unknown"]
+ConditionalApplicabilityState = Literal[
+    "not_conditional", "active", "inactive", "pending"
+]
+ApplicationRouteScope = Literal["standard", "special_internal"]
+RequirementExclusionReason = Literal["unsupported_special_internal_route"]
+GapReasonCode = Literal[
+    "matched",
+    "partially_matched",
+    "requirement_not_met",
+    "user_evidence_missing",
+    "temporal_unconfirmed",
+    "previous_cycle_reference",
+    "semantic_evidence_insufficient",
+    "conditional_pending",
+]
 GapMatchStrategy = Literal["deterministic", "semantic", "hybrid"]
 GapEvidenceType = Literal[
     "education_university",
@@ -365,6 +392,28 @@ GapEvidenceType = Literal[
     "material_quantity",
     "experience",
     "generic",
+]
+EvidenceValueKind = Literal["categorical", "numeric", "boolean", "text", "date"]
+LanguageProofKind = Literal[
+    "scored_test",
+    "medium_of_instruction",
+    "certificate",
+    "waiver",
+]
+GREScoreComponent = Literal["verbal", "quantitative", "analytical_writing"]
+ExperienceType = Literal["work", "internship", "research", "project", "other"]
+ExperienceDurationUnit = Literal["months", "years"]
+OtherCollectionKind = Literal[
+    "boolean", "numeric", "single_select", "multi_select", "short_text"
+]
+StandardMaterialType = Literal[
+    "cv",
+    "transcript",
+    "personal_statement",
+    "portfolio",
+    "degree_certificate",
+    "identification",
+    "recommendation_letters",
 ]
 GapConstraintKind = Literal[
     "score",
@@ -389,6 +438,8 @@ class UserEvidence(BaseModel):
 class GapEvidenceNeed(BaseModel):
     key: str = Field(min_length=1)
     evidence_type: GapEvidenceType
+    value_kind: EvidenceValueKind = "text"
+    proof_kind: Optional[LanguageProofKind] = None
     label: str = ""
     already_known: bool = False
     required_fields: List[str] = Field(default_factory=list)
@@ -397,6 +448,11 @@ class GapEvidenceNeed(BaseModel):
     minimum: Optional[float] = None
     component_minimum: Optional[float] = None
     required_quantity: Optional[float] = None
+    unit: Optional[str] = None
+    material_type: Optional[StandardMaterialType] = None
+    item_id: Optional[str] = None
+    other_value_kind: Optional[OtherCollectionKind] = None
+    other_options: List[str] = Field(default_factory=list)
 
     @field_validator("evidence_type", mode="before")
     @classmethod
@@ -420,12 +476,136 @@ class GapConstraintOption(BaseModel):
     component_minimum: Optional[float] = None
     required_quantity: Optional[float] = None
     unit: str = ""
+    component: Optional[GREScoreComponent] = None
 
 
 class GapDeterministicConstraint(BaseModel):
     kind: GapConstraintKind = "none"
     relation: Literal["all", "any"] = "all"
     options: List[GapConstraintOption] = Field(default_factory=list)
+
+
+class GapCourseRequirement(BaseModel):
+    item_id: str = ""
+    evidence_key: str = Field(min_length=1)
+    course_name: str = Field(min_length=1)
+    group_label: Optional[str] = None
+    minimum_credits: Optional[float] = Field(default=None, ge=0)
+    unit: Optional[str] = None
+
+    @field_validator("evidence_key", "course_name", mode="before")
+    @classmethod
+    def normalize_required_text(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("group_label", "unit", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+ConditionalPredicateOperator = Literal["equals", "in"]
+
+
+class GapConditionalPredicate(BaseModel):
+    evidence_key: str = Field(min_length=1)
+    operator: ConditionalPredicateOperator
+    expected_values: List[str] = Field(min_length=1)
+
+    @field_validator("evidence_key", mode="before")
+    @classmethod
+    def normalize_predicate_key(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("expected_values", mode="before")
+    @classmethod
+    def normalize_expected_values(cls, value: Any) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        return list(
+            dict.fromkeys(
+                item.strip()
+                for item in value
+                if isinstance(item, str) and item.strip()
+            )
+        )
+
+    @model_validator(mode="after")
+    def validate_equals_arity(self) -> "GapConditionalPredicate":
+        if self.operator == "equals" and len(self.expected_values) != 1:
+            raise ValueError("equals predicate requires exactly one expected value")
+        return self
+
+
+class GapConditionalMetadata(BaseModel):
+    is_conditional: bool = False
+    condition_text: Optional[str] = None
+    controlling_evidence_keys: List[str] = Field(default_factory=list)
+    predicate_relation: Literal["all", "any"] = "all"
+    predicates: List[GapConditionalPredicate] = Field(default_factory=list)
+
+    @field_validator("condition_text", mode="before")
+    @classmethod
+    def normalize_condition_text(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    @field_validator("controlling_evidence_keys", mode="before")
+    @classmethod
+    def normalize_controlling_keys(cls, value: Any) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+    @field_validator("predicates", mode="before")
+    @classmethod
+    def keep_valid_predicates(cls, value: Any) -> List[GapConditionalPredicate]:
+        if not isinstance(value, list):
+            logger.warning("invalid_conditional_predicates_container dropped=true")
+            return []
+        valid = []
+        for item in value:
+            try:
+                valid.append(GapConditionalPredicate.model_validate(item))
+            except ValidationError as error:
+                logger.warning(
+                    "invalid_conditional_predicate dropped=true error_type=%s",
+                    type(error).__name__,
+                )
+        return valid
+
+
+class GapOtherEvidenceDescriptor(BaseModel):
+    source_evidence_key: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    value_kind: OtherCollectionKind
+    options: List[str] = Field(default_factory=list)
+
+    @field_validator("source_evidence_key", "label", mode="before")
+    @classmethod
+    def normalize_other_text(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def normalize_other_options(cls, value: Any) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        return list(
+            dict.fromkeys(
+                item.strip()
+                for item in value
+                if isinstance(item, str) and item.strip()
+            )
+        )
+
+
+class GapOtherItem(GapOtherEvidenceDescriptor):
+    item_id: str = Field(min_length=1)
+    evidence_key: str = Field(min_length=1)
 
 
 class GapPlannerRequirementDraft(BaseModel):
@@ -437,12 +617,361 @@ class GapPlannerRequirementDraft(BaseModel):
     constraint: GapDeterministicConstraint = Field(
         default_factory=GapDeterministicConstraint
     )
+    course_requirements: List[GapCourseRequirement] = Field(default_factory=list)
+    conditional: GapConditionalMetadata = Field(default_factory=GapConditionalMetadata)
+    other_items: List[GapOtherEvidenceDescriptor] = Field(default_factory=list)
+
+
+class GapPlannerEvidenceNeedDraft(BaseModel):
+    key: str = Field(min_length=1)
+    evidence_type: GapEvidenceType
+    value_kind: EvidenceValueKind
+    proof_kind: Optional[LanguageProofKind] = None
+    label: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def fill_legacy_value_kind(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or value.get("value_kind") is not None:
+            return value
+        normalized = dict(value)
+        canonical = canonical_evidence_value_kind(
+            str(normalized.get("key", "")),
+            normalized.get("evidence_type"),
+        )
+        normalized["value_kind"] = canonical or "text"
+        logger.warning(
+            "gap_evidence_value_kind_missing key=%r fallback=%s",
+            normalized.get("key"),
+            normalized["value_kind"],
+        )
+        return normalized
+
+    @field_validator("evidence_type", mode="before")
+    @classmethod
+    def normalize_evidence_type(cls, value: Any) -> Any:
+        if value == "material_boolean":
+            return "material_status"
+        if value not in get_args(GapEvidenceType):
+            logger.warning(
+                "unknown_gap_evidence_type value=%r fallback=generic",
+                value,
+            )
+            return "generic"
+        return value
+
+
+class GapPlannerRequirementLLMDraft(BaseModel):
+    requirement_id: str
+    matchable: bool
+    informational_reason: str = ""
+    match_strategy: GapMatchStrategy = "semantic"
+    evidence_needs: List[GapPlannerEvidenceNeedDraft] = Field(default_factory=list)
+    constraint: GapDeterministicConstraint = Field(
+        default_factory=GapDeterministicConstraint
+    )
+    course_requirements: List[GapCourseRequirement] = Field(default_factory=list)
+    conditional: GapConditionalMetadata = Field(default_factory=GapConditionalMetadata)
+    other_items: List[GapOtherEvidenceDescriptor] = Field(default_factory=list)
+
+    @field_validator("course_requirements", mode="before")
+    @classmethod
+    def keep_valid_course_requirements(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            logger.warning("invalid_course_requirements_container dropped")
+            return []
+        valid = []
+        for item in value:
+            try:
+                valid.append(GapCourseRequirement.model_validate(item))
+            except ValidationError as error:
+                logger.warning(
+                    "invalid_course_requirement_item dropped error_type=%s",
+                    type(error).__name__,
+                )
+        return valid
+
+    @field_validator("other_items", mode="before")
+    @classmethod
+    def keep_valid_other_items(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            logger.warning("invalid_other_items_container dropped")
+            return []
+        valid = []
+        for item in value:
+            try:
+                valid.append(GapOtherEvidenceDescriptor.model_validate(item))
+            except ValidationError as error:
+                logger.warning(
+                    "invalid_other_descriptor dropped error_type=%s",
+                    type(error).__name__,
+                )
+        return valid
+
+
+GapQuestionControlType = Literal[
+    "boolean",
+    "boolean_group",
+    "experience_form",
+    "single_select",
+    "multi_select",
+    "number",
+    "number_group",
+    "date",
+    "short_text",
+    "text_fallback",
+]
+QuestionGenerationFailureStage = Literal[
+    "initial_generation_failed",
+    "initial_schema_missing",
+    "initial_schema_invalid",
+    "repair_generation_failed",
+    "repair_schema_missing",
+    "repair_schema_invalid",
+    "ownership_failed",
+    "normalization_failed",
+]
+GapQuestionValuePath = Literal[
+    "description",
+    "status",
+    "completed",
+    "score",
+    "scale",
+    "quantity",
+    "duration",
+    "listening",
+    "reading",
+    "writing",
+    "speaking",
+    "date",
+    "verbal",
+    "quantitative",
+    "analytical_writing",
+    "has_experience",
+    "experience_types",
+    "unit",
+]
+
+
+class GapQuestionOption(BaseModel):
+    value: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    evidence_key: Optional[str] = None
+    evidence_value: Any = None
+
+
+class GapQuestionField(BaseModel):
+    field_id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    evidence_key: str = Field(min_length=1)
+    value_path: GapQuestionValuePath = "description"
+    required: bool = True
+    placeholder: Optional[str] = None
+
+
+class GapQuestionValidation(BaseModel):
+    required: bool = True
+    minimum: Optional[float] = None
+    maximum: Optional[float] = None
+    step: Optional[float] = None
+    min_selections: Optional[int] = Field(default=None, ge=0)
+    max_selections: Optional[int] = Field(default=None, ge=1)
+
+
+class GapQuestionGenerationDiagnostics(BaseModel):
+    requirement_id: Optional[str] = None
+    allowed_evidence_keys: List[str] = Field(default_factory=list)
+    group_relation: Literal["all", "any"] = "all"
+    initial_schema: Optional[Dict[str, Any]] = None
+    initial_failure_stage: Optional[QuestionGenerationFailureStage] = None
+    initial_validator_error: Optional[str] = None
+    repair_schema: Optional[Dict[str, Any]] = None
+    repair_failure_stage: Optional[QuestionGenerationFailureStage] = None
+    repair_validator_error: Optional[str] = None
+    final_failure_stage: Optional[QuestionGenerationFailureStage] = None
+
+
+class GapConditionalControllerBinding(BaseModel):
+    evidence_key: str = Field(min_length=1)
+    operator: ConditionalPredicateOperator
+    expected_values: List[str] = Field(min_length=1)
 
 
 class GapPlannerQuestion(BaseModel):
-    question_id: str
-    question: str = Field(min_length=1)
-    evidence_keys: List[str] = Field(min_length=1)
+    question_id: str = ""
+    requirement_id: Optional[str] = None
+    question: str = ""
+    prompt: str = ""
+    evidence_keys: List[str] = Field(default_factory=list)
+    expected_evidence_keys: List[str] = Field(default_factory=list)
+    allowed_evidence_keys: List[str] = Field(default_factory=list)
+    evidence_group: Optional[str] = None
+    group_relation: Literal["all", "any"] = "all"
+    control_type: str = "boolean"
+    options: List[GapQuestionOption] = Field(default_factory=list)
+    fields: List[GapQuestionField] = Field(default_factory=list)
+    validation: GapQuestionValidation = Field(default_factory=GapQuestionValidation)
+    allow_unknown: bool = True
+    allow_negative: bool = True
+    allow_other: bool = True
+    schema_status: Literal["valid", "invalid", "fallback", "generation_error"] = "valid"
+    schema_error_code: Optional[str] = None
+    repair_attempts: int = Field(default=0, ge=0, le=1)
+    generation_diagnostics: Optional[GapQuestionGenerationDiagnostics] = None
+    conditional_controller_bindings: List[GapConditionalControllerBinding] = Field(
+        default_factory=list
+    )
+
+    @field_validator("question", "prompt", mode="before")
+    @classmethod
+    def normalize_prompt_text(cls, value: Any) -> str:
+        return value.strip() if isinstance(value, str) else ""
+
+    @field_validator(
+        "evidence_keys",
+        "expected_evidence_keys",
+        "allowed_evidence_keys",
+        mode="before",
+    )
+    @classmethod
+    def normalize_question_keys(cls, value: Any) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, str) and item.strip()]
+
+    @field_validator("group_relation", mode="before")
+    @classmethod
+    def normalize_group_relation(cls, value: Any) -> str:
+        return value if value in {"all", "any"} else "all"
+
+    @field_validator("control_type", mode="before")
+    @classmethod
+    def normalize_control_type(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else ""
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def keep_valid_options(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            return []
+        valid = []
+        for option in value:
+            try:
+                valid.append(GapQuestionOption.model_validate(option))
+            except ValidationError:
+                logger.warning("invalid_gap_question_option dropped")
+        return valid
+
+    @field_validator("fields", mode="before")
+    @classmethod
+    def keep_valid_fields(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            return []
+        valid = []
+        for field in value:
+            try:
+                valid.append(GapQuestionField.model_validate(field))
+            except ValidationError:
+                logger.warning("invalid_gap_question_field dropped")
+        return valid
+
+    @field_validator("validation", mode="before")
+    @classmethod
+    def normalize_validation(cls, value: Any) -> Any:
+        try:
+            return GapQuestionValidation.model_validate(value or {})
+        except ValidationError:
+            logger.warning("invalid_gap_question_validation fallback=default")
+            return GapQuestionValidation()
+
+    @model_validator(mode="after")
+    def synchronize_legacy_fields(self) -> "GapPlannerQuestion":
+        prompt = (self.prompt or self.question).strip()
+        keys = self.expected_evidence_keys or self.evidence_keys
+        self.prompt = prompt
+        self.question = prompt
+        self.expected_evidence_keys = list(dict.fromkeys(keys))
+        self.evidence_keys = list(self.expected_evidence_keys)
+        return self
+
+
+class GapPlannerQuestionLLMDraft(BaseModel):
+    question_id: str = ""
+    requirement_id: Optional[str] = None
+    prompt: str = ""
+    expected_evidence_keys: List[str] = Field(default_factory=list)
+    group_relation: Literal["all", "any"] = "all"
+    control_type: str = ""
+    options: List[GapQuestionOption] = Field(default_factory=list)
+    fields: List[GapQuestionField] = Field(default_factory=list)
+    validation: GapQuestionValidation = Field(default_factory=GapQuestionValidation)
+    allow_unknown: bool = True
+    allow_negative: bool = True
+    allow_other: bool = True
+
+    @field_validator("control_type", mode="before")
+    @classmethod
+    def normalize_control_type(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else ""
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def keep_valid_options(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            return []
+        valid = []
+        for option in value:
+            try:
+                valid.append(GapQuestionOption.model_validate(option))
+            except ValidationError:
+                logger.warning("invalid_gap_question_option dropped")
+        return valid
+
+    @field_validator("fields", mode="before")
+    @classmethod
+    def keep_valid_fields(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            return []
+        valid = []
+        for field in value:
+            try:
+                valid.append(GapQuestionField.model_validate(field))
+            except ValidationError:
+                logger.warning("invalid_gap_question_field dropped")
+        return valid
+
+    @field_validator("validation", mode="before")
+    @classmethod
+    def normalize_validation(cls, value: Any) -> Any:
+        try:
+            return GapQuestionValidation.model_validate(value or {})
+        except ValidationError:
+            logger.warning("invalid_gap_question_validation fallback=default")
+            return GapQuestionValidation()
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_question_fields(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        if not normalized.get("prompt") and normalized.get("question"):
+            normalized["prompt"] = normalized["question"]
+        if (
+            not normalized.get("expected_evidence_keys")
+            and normalized.get("evidence_keys")
+        ):
+            normalized["expected_evidence_keys"] = normalized["evidence_keys"]
+        return normalized
+
+
+class GapPlannerLLMOutput(BaseModel):
+    requirements: List[GapPlannerRequirementLLMDraft] = Field(default_factory=list)
+    questions: List[GapPlannerQuestionLLMDraft] = Field(default_factory=list)
+
+
+class GapQuestionRepairOutput(BaseModel):
+    questions: List[GapPlannerQuestionLLMDraft] = Field(default_factory=list)
 
 
 class GapPlannerOutput(BaseModel):
@@ -451,6 +980,7 @@ class GapPlannerOutput(BaseModel):
 
 
 class GapPlannedRequirement(GapPlannerRequirementDraft):
+    other_items: List[GapOtherItem] = Field(default_factory=list)
     category: RequirementCategory
     requirement: str
     requirement_zh: Optional[str] = None
@@ -462,6 +992,17 @@ class GapPlannedRequirement(GapPlannerRequirementDraft):
     source_cycle: Optional[str] = None
     temporal_applicability: RequirementTemporalApplicability
     temporal_note: Optional[str] = None
+    user_matchable: bool = True
+    conditional_state: ConditionalApplicabilityState = "not_conditional"
+    parent_requirement_id: Optional[str] = None
+    parent_requirement_text: Optional[str] = None
+    parent_has_explicit_conditional_scope: bool = False
+    conditional_scope_source: Literal["none", "self", "parent"] = "none"
+    route_scope: ApplicationRouteScope = "standard"
+    excluded_reason: Optional[RequirementExclusionReason] = None
+    route_scope_source: Literal["current_requirement", "named_route", "parent"] = (
+        "current_requirement"
+    )
 
 
 class GapPlan(BaseModel):
@@ -479,6 +1020,13 @@ class GapPlanRequest(BaseModel):
     user_evidence: List[UserEvidence] = Field(default_factory=list)
 
 
+class GapQuestionRepairRequest(BaseModel):
+    question: GapPlannerQuestion
+    requirement: GapPlannedRequirement
+    user_profile: UserProfile = Field(default_factory=UserProfile)
+    user_evidence: List[UserEvidence] = Field(default_factory=list)
+
+
 class GapEvidenceParseRequest(BaseModel):
     question: GapPlannerQuestion
     evidence_needs: List[GapEvidenceNeed]
@@ -492,6 +1040,129 @@ class GapEvidenceParseResponse(BaseModel):
     follow_up_question: Optional[str] = None
     satisfied_evidence_groups: List[str] = Field(default_factory=list)
     slot_states: Dict[str, EvidenceSlotStatus] = Field(default_factory=dict)
+    parser_calls: int = 0
+
+
+class GapStructuredAnswer(BaseModel):
+    values: Dict[str, Any] = Field(default_factory=dict)
+    selected_options: List[str] = Field(default_factory=list)
+    terminal_state: Optional[Literal["known_negative", "unknown"]] = None
+
+
+class CourseRequirementEvidenceValue(BaseModel):
+    requirement_id: str = Field(min_length=1)
+    item_id: str = Field(min_length=1)
+    course_name: str = Field(min_length=1)
+    completed: bool
+
+
+class CourseCreditEvidenceValue(BaseModel):
+    requirement_id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    quantity: float = Field(ge=0)
+    unit: str = Field(min_length=1)
+
+
+class GREScoreEvidenceValue(BaseModel):
+    verbal: Optional[float] = Field(default=None, ge=0)
+    quantitative: Optional[float] = Field(default=None, ge=0)
+    analytical_writing: Optional[float] = Field(default=None, ge=0)
+
+
+class ExperienceDurationValue(BaseModel):
+    quantity: float = Field(ge=0)
+    unit: ExperienceDurationUnit
+
+
+class ExperienceEvidenceValue(BaseModel):
+    requirement_id: str = Field(min_length=1)
+    has_experience: bool
+    experience_types: List[ExperienceType] = Field(default_factory=list)
+    duration: Optional[ExperienceDurationValue] = None
+
+    @model_validator(mode="after")
+    def validate_experience_state(self) -> "ExperienceEvidenceValue":
+        if not self.has_experience:
+            self.experience_types = []
+            self.duration = None
+            return self
+        if not self.experience_types or self.duration is None:
+            raise ValueError("experience types and duration are required when experience exists")
+        return self
+
+
+class MaterialItemEvidenceValue(BaseModel):
+    requirement_id: str = Field(min_length=1)
+    item_id: str = Field(min_length=1)
+    material_type: StandardMaterialType
+    label: str = Field(min_length=1)
+    available: bool
+
+
+class MaterialQuantityEvidenceValue(BaseModel):
+    requirement_id: str = Field(min_length=1)
+    item_id: str = Field(min_length=1)
+    material_type: Literal["recommendation_letters"]
+    quantity: float = Field(ge=0)
+
+
+class OtherItemEvidenceValue(BaseModel):
+    requirement_id: str = Field(min_length=1)
+    item_id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    value_kind: OtherCollectionKind
+    value: Any
+    options: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_typed_other_value(self) -> "OtherItemEvidenceValue":
+        if self.value_kind == "boolean" and not isinstance(self.value, bool):
+            raise ValueError("boolean Other evidence must be boolean")
+        if self.value_kind == "numeric" and (
+            isinstance(self.value, bool) or not isinstance(self.value, (int, float))
+        ):
+            raise ValueError("numeric Other evidence must be numeric")
+        if self.value_kind == "single_select" and (
+            not isinstance(self.value, str) or self.value not in self.options
+        ):
+            raise ValueError("single-select Other evidence must use one allowed option")
+        if self.value_kind == "multi_select" and (
+            not isinstance(self.value, list)
+            or not self.value
+            or any(item not in self.options for item in self.value)
+        ):
+            raise ValueError("multi-select Other evidence must use allowed options")
+        if self.value_kind == "short_text" and (
+            not isinstance(self.value, str)
+            or not self.value.strip()
+            or len(self.value.strip()) > 200
+        ):
+            raise ValueError("short-text Other evidence must contain 1-200 characters")
+        return self
+
+
+class ConditionalControllerEvidenceValue(BaseModel):
+    requirement_id: str = Field(min_length=1)
+    item_id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    value_kind: Literal["boolean"] = "boolean"
+    matches_condition: bool
+    value: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_controller_value(self) -> "ConditionalControllerEvidenceValue":
+        if self.matches_condition and not self.value:
+            raise ValueError("matching controller evidence requires a predicate value")
+        if not self.matches_condition:
+            self.value = None
+        return self
+
+
+class GapStructuredEvidenceRequest(BaseModel):
+    question: GapPlannerQuestion
+    evidence_needs: List[GapEvidenceNeed]
+    answer: GapStructuredAnswer
+    existing_evidence: List[UserEvidence] = Field(default_factory=list)
 
 
 class SemanticGapJudgement(BaseModel):
@@ -516,6 +1187,7 @@ class GapResult(BaseModel):
     ]
     importance: RequirementImportance = "unknown"
     status: GapStatus
+    reason_code: GapReasonCode = "semantic_evidence_insufficient"
     user_evidence: str
     gap: str
     reason: str
@@ -523,6 +1195,7 @@ class GapResult(BaseModel):
     source_cycle: Optional[str] = None
     temporal_applicability: RequirementTemporalApplicability
     temporal_note: Optional[str] = None
+    conditional_state: ConditionalApplicabilityState = "not_conditional"
 
 
 class GapAnalysisRequest(BaseModel):
@@ -682,11 +1355,22 @@ def safe_error_message(error: Exception, api_key: str) -> str:
     return message.replace(api_key, "[REDACTED]") if api_key else message
 
 
+class DeepSeekTextResult(BaseModel):
+    content: str
+    stop_reason: Optional[str] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
+
+
 async def call_deepseek(
     messages: List[Dict[str, str]],
     max_tokens: int,
     response_format: Optional[Dict[str, str]] = None,
-) -> str:
+    *,
+    include_metadata: bool = False,
+    diagnostic_label: Optional[str] = None,
+) -> Any:
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
         raise HTTPException(
@@ -731,10 +1415,29 @@ async def call_deepseek(
             detail=f"DeepSeek API request failed: {safe_error_message(error, api_key)}",
         ) from error
 
-    content = response.choices[0].message.content
-    if not content:
+    choice = response.choices[0]
+    content = choice.message.content
+    usage = response.usage
+    result = DeepSeekTextResult(
+        content=content or "",
+        stop_reason=getattr(choice, "finish_reason", None),
+        input_tokens=getattr(usage, "prompt_tokens", None) if usage else None,
+        output_tokens=getattr(usage, "completion_tokens", None) if usage else None,
+        total_tokens=getattr(usage, "total_tokens", None) if usage else None,
+    )
+    if diagnostic_label:
+        logger.info(
+            "%s stop_reason=%s input_tokens=%s output_tokens=%s total_tokens=%s final_text_length=%d",
+            diagnostic_label,
+            result.stop_reason,
+            result.input_tokens,
+            result.output_tokens,
+            result.total_tokens,
+            len(result.content),
+        )
+    if not content and not include_metadata:
         raise HTTPException(status_code=502, detail="DeepSeek API returned an empty response")
-    return content
+    return result if include_metadata else result.content
 
 
 @app.get("/deepseek-test", tags=["system"])
@@ -768,67 +1471,34 @@ def qs_subject_records() -> Dict[str, Dict[str, Any]]:
     }
 
 
+def qs_subject_id(subject_name: str) -> str:
+    normalized = subject_name.casefold().replace("&", " and ")
+    return re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
+
+
+def qs_subject_records_by_id() -> Dict[str, Dict[str, Any]]:
+    return {
+        qs_subject_id(subject_name): record
+        for subject_name, record in qs_subject_records().items()
+    }
+
+
 @app.get("/rankings/qs/subjects", tags=["rankings"])
 async def list_qs_subjects() -> Dict[str, Any]:
     """Return the locally imported, official QS Subject taxonomy."""
-    return load_qs_subject_taxonomy()
-
-
-@app.post(
-    "/rankings/qs/map-subject",
-    response_model=QSSubjectMappingResult,
-    tags=["rankings"],
-)
-async def map_target_major_to_qs_subject(
-    request: QSSubjectMappingRequest,
-) -> QSSubjectMappingResult:
-    """Map a user's major to one to three names from the local QS taxonomy."""
-    target_major = request.target_major.strip()
-    if not target_major:
-        raise HTTPException(status_code=422, detail="target_major must not be blank")
-
-    allowed_subjects = list(qs_subject_records())
-    mapping_prompt = (
-        "将用户目标专业映射到最相关的 QS 学科。你只能从 allowed_subjects 原样选择名称，"
-        "禁止翻译、改写或创造名称。明显唯一匹配时返回 1 个；存在合理歧义时返回 2 到 3 个，"
-        "按相关性从高到低排序。只输出 JSON。\n\n"
-        f"target_major：{target_major}\n"
-        f"allowed_subjects：{json.dumps(allowed_subjects, ensure_ascii=False)}\n"
-        f"输出结构：{json.dumps(QSSubjectMappingResult(target_major=target_major).model_dump(), ensure_ascii=False)}\n"
-        f"JSON Schema：{json.dumps(QSSubjectMappingResult.model_json_schema(), ensure_ascii=False)}"
-    )
-    content = await call_deepseek(
-        messages=[
+    taxonomy = load_qs_subject_taxonomy()
+    return {
+        **taxonomy,
+        "subjects": [
             {
-                "role": "system",
-                "content": "你是受控分类器，只能从用户提供的候选列表中选择值并输出 JSON。",
-            },
-            {"role": "user", "content": mapping_prompt},
+                **item,
+                "subject_id": qs_subject_id(item["subject"]),
+                "subject_name": item["subject"],
+            }
+            for item in taxonomy["subjects"]
+            if isinstance(item, dict) and isinstance(item.get("subject"), str)
         ],
-        max_tokens=350,
-        response_format={"type": "json_object"},
-    )
-    try:
-        mapped = QSSubjectMappingResult.model_validate_json(content)
-    except ValidationError as error:
-        raise HTTPException(
-            status_code=502,
-            detail=f"DeepSeek returned invalid QS Subject mapping data: {error}",
-        ) from error
-
-    allowed_set = set(allowed_subjects)
-    candidates: List[str] = []
-    for subject in mapped.candidates:
-        if subject in allowed_set and subject not in candidates:
-            candidates.append(subject)
-        if len(candidates) == 3:
-            break
-    if not candidates:
-        raise HTTPException(
-            status_code=502,
-            detail="DeepSeek did not return a valid Subject from the local QS taxonomy",
-        )
-    return QSSubjectMappingResult(target_major=target_major, candidates=candidates)
+    }
 
 
 QS_COUNTRY_FILTERS: Dict[str, List[str]] = {
@@ -944,15 +1614,10 @@ def has_possible_overall_name_match(
     return False
 
 
-@app.post(
-    "/candidate-universities/discover",
-    response_model=CandidateUniversityResult,
-    tags=["programs"],
-)
-async def discover_candidate_universities(
+async def _filter_candidate_universities(
     target: ExploreTargetRequest,
 ) -> CandidateUniversityResult:
-    """Filter the locally imported QS rankings without any external API call."""
+    """Filter the locally imported QS rankings without enriching external metadata."""
     if target.ranking.min > target.ranking.max:
         raise HTTPException(
             status_code=422,
@@ -965,12 +1630,28 @@ async def discover_candidate_universities(
     if target.ranking.basis == "overall":
         edition = 2027
     else:
-        ranking_subject = (target.ranking_subject or "").strip()
-        subject_record = qs_subject_records().get(ranking_subject)
+        subject_id = (target.ranking_subject_id or "").strip()
+        supplied_name = (target.ranking_subject or "").strip()
+        if subject_id:
+            subject_record = qs_subject_records_by_id().get(subject_id)
+            ranking_subject = (
+                str(subject_record["subject"]) if subject_record is not None else None
+            )
+            if subject_record is not None and supplied_name and supplied_name != ranking_subject:
+                raise HTTPException(
+                    status_code=422,
+                    detail="ranking_subject_id and ranking_subject do not identify the same QS Subject",
+                )
+        else:
+            ranking_subject = supplied_name
+            subject_record = qs_subject_records().get(ranking_subject)
         if subject_record is None:
             raise HTTPException(
                 status_code=422,
-                detail="ranking_subject must be an exact Subject from the local QS taxonomy",
+                detail=(
+                    "ranking_subject_id or ranking_subject must identify an exact Subject "
+                    "from the local QS taxonomy"
+                ),
             )
         edition = int(subject_record["edition"])
 
@@ -1088,9 +1769,7 @@ async def discover_candidate_universities(
                 subject_ranking=subject_ranking,
             )
         )
-    return CandidateUniversityResult(
-        universities=await enrich_school_official_urls(universities)
-    )
+    return CandidateUniversityResult(universities=universities)
 
 
 StructuredOutputT = TypeVar("StructuredOutputT", bound=BaseModel)
@@ -1313,11 +1992,106 @@ async def enrich_school_official_urls(
     ]
 
 
+async def enrich_school_official_urls_cached(
+    universities: List[CandidateUniversity],
+    *,
+    force_refresh: bool = False,
+    cache: ProgrammeCache = PROGRAMME_CACHE,
+) -> List[CandidateUniversity]:
+    """Reuse long-lived school homepage metadata and search only cache misses."""
+    if not universities:
+        return universities
+
+    resolved: Dict[int, str] = {}
+    cached_fallback: Dict[int, str] = {}
+    search_indices: List[int] = []
+    for index, university in enumerate(universities):
+        key = university_cache_key(university.university, university.country)
+        cached_url = cache.read_university_official_url(key)
+        if cached_url:
+            cached_fallback[index] = cached_url
+        if cached_url and not force_refresh:
+            resolved[index] = cached_url
+        else:
+            search_indices.append(index)
+
+    if search_indices:
+        searched = await enrich_school_official_urls(
+            [universities[index] for index in search_indices]
+        )
+        for original_index, enriched in zip(search_indices, searched):
+            university = universities[original_index]
+            key = university_cache_key(university.university, university.country)
+            if enriched.school_official_url:
+                resolved[original_index] = enriched.school_official_url
+                try:
+                    cache.write_university_official_url(
+                        key,
+                        university.university,
+                        university.country,
+                        enriched.school_official_url,
+                    )
+                except (OSError, sqlite3.Error) as error:
+                    logger.warning("university_url_cache_write_failed key=%s error=%s", key, error)
+            elif original_index in cached_fallback:
+                resolved[original_index] = cached_fallback[original_index]
+
+    logger.info(
+        "university_url_cache_result total=%d hits=%d searches=%d force_refresh=%s",
+        len(universities),
+        len(universities) - len(search_indices),
+        len(search_indices),
+        force_refresh,
+    )
+    return [
+        university.model_copy(update={"school_official_url": resolved.get(index)})
+        for index, university in enumerate(universities)
+    ]
+
+
+async def discover_candidate_universities(
+    target: ExploreTargetRequest,
+) -> CandidateUniversityResult:
+    """Preserve the original live discovery function for direct callers and tests."""
+    result = await _filter_candidate_universities(target)
+    return result.model_copy(
+        update={"universities": await enrich_school_official_urls(result.universities)}
+    )
+
+
+async def discover_candidate_universities_cached(
+    target: ExploreTargetRequest,
+    *,
+    force_refresh: bool = False,
+    cache: ProgrammeCache = PROGRAMME_CACHE,
+) -> CandidateUniversityResult:
+    result = await _filter_candidate_universities(target)
+    return result.model_copy(
+        update={
+            "universities": await enrich_school_official_urls_cached(
+                result.universities,
+                force_refresh=force_refresh,
+                cache=cache,
+            )
+        }
+    )
+
+
 @app.post(
-    "/candidate-programs/discover",
-    response_model=CandidateProgramResult,
+    "/candidate-universities/discover",
+    response_model=CandidateUniversityResult,
     tags=["programs"],
 )
+async def discover_candidate_universities_endpoint(
+    target: ExploreTargetRequest,
+    force_refresh: bool = Query(default=False),
+) -> CandidateUniversityResult:
+    return await discover_candidate_universities_cached(
+        target,
+        force_refresh=force_refresh,
+    )
+
+
 async def discover_candidate_programs(
     request: UniversityProgramRequest,
 ) -> CandidateProgramResult:
@@ -1360,6 +2134,169 @@ async def discover_candidate_programs(
             )
             for item in result.programs
         ]
+    )
+
+
+def normalized_programme_query(target: ExploreTargetRequest) -> str:
+    return re.sub(
+        r"\s+",
+        " ",
+        f"{target.target_major} {target.additional_preferences}".strip().casefold(),
+    )
+
+
+def programme_relevance_score(
+    record: ProgrammePoolRecord,
+    target: ExploreTargetRequest,
+) -> tuple[int, int, int, int]:
+    query = normalized_programme_query(target)
+    target_major = re.sub(r"\s+", " ", target.target_major.strip().casefold())
+    haystack = " ".join(
+        (
+            record.programme,
+            record.degree_type,
+            record.relevance_reason,
+        )
+    ).casefold()
+    query_history = record.source_metadata.get("queries", [])
+    exact_history = int(query in query_history)
+    phrase_match = int(bool(target_major) and target_major in haystack)
+    query_tokens = set(re.findall(r"[\w]+", query, flags=re.UNICODE))
+    haystack_tokens = set(re.findall(r"[\w]+", haystack, flags=re.UNICODE))
+    token_overlap = len(query_tokens & haystack_tokens)
+    return (exact_history, phrase_match, token_overlap, -record.discovery_order)
+
+
+def candidate_programmes_from_pool(
+    request: UniversityProgramRequest,
+    records: List[ProgrammePoolRecord],
+    *,
+    refresh_scheduled: bool = False,
+) -> CandidateProgramResult:
+    university = request.university
+    ranked = sorted(
+        records,
+        key=lambda item: programme_relevance_score(item, request.target),
+        reverse=True,
+    )[:5]
+    return CandidateProgramResult(
+        candidates=[
+            CandidateProgram(
+                university=university.university,
+                program=item.programme,
+                country=university.country,
+                ranking=university.ranking,
+                ranking_system="QS",
+                ranking_edition=university.ranking_edition,
+                ranking_source_url=university.ranking_source_url,
+                official_program_url=item.official_program_url,
+                degree_type=item.degree_type,
+                relevance_reason=item.relevance_reason,
+            )
+            for item in ranked
+        ],
+        cache_source="programme_pool",
+        refresh_scheduled=refresh_scheduled,
+    )
+
+
+async def refresh_school_programme_pool(
+    request: UniversityProgramRequest,
+    cache: ProgrammeCache = PROGRAMME_CACHE,
+) -> CandidateProgramResult:
+    """Run the existing live discovery once and incrementally merge successful output."""
+    live_result = await discover_candidate_programs(request)
+    university = request.university
+    key = university_cache_key(university.university, university.country)
+    try:
+        cache.merge_programme_pool(
+            key,
+            university.university,
+            [item.model_dump(mode="json") for item in live_result.candidates],
+            {
+                "source": "deepseek_web_search",
+                "queries": [normalized_programme_query(request.target)],
+                "school_official_url": university.school_official_url,
+            },
+        )
+    except (OSError, sqlite3.Error, TypeError, ValueError) as error:
+        logger.warning("programme_pool_merge_failed key=%s error=%s", key, error)
+    return live_result
+
+
+async def refresh_school_programme_pool_background(
+    request: UniversityProgramRequest,
+    cache: ProgrammeCache = PROGRAMME_CACHE,
+) -> None:
+    try:
+        await refresh_school_programme_pool(request, cache)
+    except HTTPException as error:
+        logger.warning(
+            "programme_pool_background_refresh_failed university=%r status=%s",
+            request.university.university,
+            error.status_code,
+        )
+
+
+async def discover_candidate_programs_cached(
+    request: UniversityProgramRequest,
+    *,
+    force_refresh: bool = False,
+    background_tasks: Optional[BackgroundTasks] = None,
+    cache: ProgrammeCache = PROGRAMME_CACHE,
+) -> CandidateProgramResult:
+    university = request.university
+    key = university_cache_key(university.university, university.country)
+    snapshot = cache.read_programme_pool(key)
+
+    if force_refresh:
+        await refresh_school_programme_pool(request, cache)
+        refreshed = cache.read_programme_pool(key)
+        if refreshed.programmes:
+            return candidate_programmes_from_pool(request, refreshed.programmes)
+        return CandidateProgramResult(candidates=[])
+
+    if snapshot.programmes:
+        if snapshot.fresh:
+            logger.info("programme_pool_hit university=%r fresh=true", university.university)
+            return candidate_programmes_from_pool(request, snapshot.programmes)
+        scheduled = background_tasks is not None
+        if background_tasks is not None:
+            background_tasks.add_task(refresh_school_programme_pool_background, request, cache)
+        logger.info(
+            "programme_pool_hit university=%r fresh=false refresh_scheduled=%s",
+            university.university,
+            scheduled,
+        )
+        return candidate_programmes_from_pool(
+            request,
+            snapshot.programmes,
+            refresh_scheduled=scheduled,
+        )
+
+    live_result = await refresh_school_programme_pool(request, cache)
+    if not live_result.candidates:
+        return live_result
+    refreshed = cache.read_programme_pool(key)
+    if refreshed.programmes:
+        return candidate_programmes_from_pool(request, refreshed.programmes)
+    return live_result
+
+
+@app.post(
+    "/candidate-programs/discover",
+    response_model=CandidateProgramResult,
+    tags=["programs"],
+)
+async def discover_candidate_programs_endpoint(
+    request: UniversityProgramRequest,
+    background_tasks: BackgroundTasks,
+    force_refresh: bool = Query(default=False),
+) -> CandidateProgramResult:
+    return await discover_candidate_programs_cached(
+        request,
+        force_refresh=force_refresh,
+        background_tasks=background_tasks,
     )
 
 
@@ -1928,6 +2865,92 @@ async def retrieve_target_program_requirements(
     return requirements_review_from_extraction(target_program, extraction)
 
 
+def target_program_cache_identity(target_program: TargetProgram) -> Dict[str, Any]:
+    return normalized_programme_identity(
+        university=target_program.university,
+        programme=target_program.program,
+        official_program_url=target_program.official_program_url,
+        intended_entry_year=target_program.intended_entry_year,
+        intended_entry_term=target_program.intended_entry_term,
+    )
+
+
+def timeline_cache_identity(request: ApplicationTimelineRequest) -> Dict[str, Any]:
+    return normalized_programme_identity(
+        university=request.university,
+        programme=request.program_name,
+        official_program_url=request.official_program_url,
+        intended_entry_year=request.intended_entry_year,
+        intended_entry_term=request.intended_entry_term,
+    )
+
+
+async def retrieve_target_program_requirements_cached(
+    target_program: TargetProgram,
+    *,
+    force_refresh: bool = False,
+    cache: ProgrammeCache = PROGRAMME_CACHE,
+) -> TargetProgramRequirementsReview:
+    """Read runtime/seed snapshots before invoking the unchanged live workflow."""
+    identity = target_program_cache_identity(target_program)
+    cache_key = programme_cache_key(identity)
+    semantic_key = programme_semantic_cache_key(identity)
+    if not force_refresh:
+        records = (
+            (
+                "runtime_cache",
+                cache.read_runtime(
+                    "requirements",
+                    cache_key,
+                    semantic_key=semantic_key,
+                ),
+            ),
+            ("seed", cache.read_seed("requirements", cache_key)),
+        )
+        for source, record in records:
+            if record is None:
+                continue
+            try:
+                review = TargetProgramRequirementsReview.model_validate(record.payload)
+            except ValidationError as error:
+                logger.warning(
+                    "programme_cache_payload_invalid kind=requirements source=%s key=%s error=%s",
+                    source,
+                    cache_key,
+                    error,
+                )
+                continue
+            logger.info("programme_cache_hit kind=requirements source=%s key=%s", source, cache_key)
+            return review.model_copy(
+                update={
+                    "target_program": target_program,
+                    "checked_at": record.checked_at,
+                    "cache_source": source,
+                }
+            )
+
+    review = await retrieve_target_program_requirements(target_program)
+    review = review.model_copy(update={"cache_source": "live"})
+    has_requirements = any(category.requirements for category in review.categories)
+    if has_requirements:
+        try:
+            cache.write_runtime(
+                "requirements",
+                cache_key,
+                review.checked_at,
+                review.model_dump(mode="json"),
+                semantic_key=semantic_key,
+            )
+        except (OSError, sqlite3.Error, TypeError, ValueError) as error:
+            logger.warning(
+                "programme_cache_runtime_write_failed kind=requirements key=%s error=%s",
+                cache_key,
+                error,
+            )
+    logger.info("programme_cache_result kind=requirements source=live key=%s", cache_key)
+    return review
+
+
 def requirements_review_from_extraction(
     target_program: TargetProgram,
     extraction: RequirementsExtraction,
@@ -1969,10 +2992,14 @@ def requirements_review_from_extraction(
 )
 async def target_program_requirements_endpoint(
     target_program: TargetProgram,
+    force_refresh: bool = Query(default=False),
 ) -> TargetProgramRequirementsReview:
     try:
         return await asyncio.wait_for(
-            retrieve_target_program_requirements(target_program),
+            retrieve_target_program_requirements_cached(
+                target_program,
+                force_refresh=force_refresh,
+            ),
             timeout=REQUIREMENTS_TOTAL_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError as error:
@@ -2068,6 +3095,56 @@ async def retrieve_application_timeline(
     return normalize_application_timeline(timeline)
 
 
+async def retrieve_application_timeline_cached(
+    request: ApplicationTimelineRequest,
+    *,
+    force_refresh: bool = False,
+    cache: ProgrammeCache = PROGRAMME_CACHE,
+) -> ApplicationTimeline:
+    """Read runtime/seed snapshots before invoking the unchanged live workflow."""
+    identity = timeline_cache_identity(request)
+    cache_key = programme_cache_key(identity)
+    if not force_refresh:
+        for source, reader in (
+            ("runtime_cache", cache.read_runtime),
+            ("seed", cache.read_seed),
+        ):
+            record = reader("timeline", cache_key)
+            if record is None:
+                continue
+            try:
+                timeline = ApplicationTimeline.model_validate(record.payload)
+            except ValidationError as error:
+                logger.warning(
+                    "programme_cache_payload_invalid kind=timeline source=%s key=%s error=%s",
+                    source,
+                    cache_key,
+                    error,
+                )
+                continue
+            logger.info("programme_cache_hit kind=timeline source=%s key=%s", source, cache_key)
+            return timeline
+
+    timeline = await retrieve_application_timeline(request)
+    if timeline.status != "not_found":
+        checked_at = datetime.now(timezone.utc).isoformat()
+        try:
+            cache.write_runtime(
+                "timeline",
+                cache_key,
+                checked_at,
+                timeline.model_dump(mode="json"),
+            )
+        except (OSError, sqlite3.Error, TypeError, ValueError) as error:
+            logger.warning(
+                "programme_cache_runtime_write_failed kind=timeline key=%s error=%s",
+                cache_key,
+                error,
+            )
+    logger.info("programme_cache_result kind=timeline source=live key=%s", cache_key)
+    return timeline
+
+
 @app.post(
     "/target-programs/timeline",
     response_model=ApplicationTimeline,
@@ -2075,10 +3152,11 @@ async def retrieve_application_timeline(
 )
 async def target_program_timeline_endpoint(
     request: ApplicationTimelineRequest,
+    force_refresh: bool = Query(default=False),
 ) -> ApplicationTimeline:
     try:
         return await asyncio.wait_for(
-            retrieve_application_timeline(request),
+            retrieve_application_timeline_cached(request, force_refresh=force_refresh),
             timeout=TIMELINE_TOTAL_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError as error:
@@ -2181,18 +3259,447 @@ def merge_reusable_evidence(
     profile: UserProfile,
     user_evidence: List[UserEvidence],
 ) -> List[UserEvidence]:
-    merged: Dict[str, UserEvidence] = {
-        item.key.casefold(): item for item in profile_user_evidence(profile)
-    }
+    merged: Dict[str, UserEvidence] = {}
+    for item in profile_user_evidence(profile):
+        canonical_key = canonical_evidence_key(item.key)
+        merged[canonical_key] = item.model_copy(update={"key": canonical_key})
     for item in user_evidence:
-        merged[item.key.casefold()] = item
+        canonical_key = canonical_evidence_key(item.key)
+        canonical_item = item.model_copy(update={"key": canonical_key})
+        existing = merged.get(canonical_key)
+        if (
+            existing
+            and existing.availability == "known"
+            and canonical_item.availability == "known"
+        ):
+            canonical_item = canonical_item.model_copy(
+                update={
+                    "value": merge_evidence_value(existing.value, canonical_item.value)
+                }
+            )
+        merged[canonical_key] = canonical_item
     return list(merged.values())
+
+
+EVIDENCE_KEY_CANONICAL_ALIASES = {
+    "language.ielts": "ielts",
+    "english.ielts": "ielts",
+    "materials.ielts": "ielts",
+    "language.toefl": "toefl",
+    "english.toefl": "toefl",
+    "materials.toefl": "toefl",
+    "personal_statement": "materials.personal_statement",
+    "statement_of_purpose": "materials.personal_statement",
+    "materials.statement_of_purpose": "materials.personal_statement",
+    "materials.sop": "materials.personal_statement",
+    "materials.motivation_letter": "materials.personal_statement",
+    "motivation_letter": "materials.personal_statement",
+    "cv": "materials.cv",
+    "transcript": "materials.transcript",
+    "portfolio": "materials.portfolio",
+    "degree_certificate": "materials.degree_certificate",
+    "recommendations": "materials.recommendations",
+    "recommendation_letters": "materials.recommendations",
+    "materials.recommendation_letters": "materials.recommendations",
+    "references": "materials.recommendations",
+    "materials.references": "materials.recommendations",
+}
+
+
+STANDARD_MATERIAL_KEYS: Dict[str, tuple[StandardMaterialType, str]] = {
+    "materials.cv": ("cv", "CV / 简历"),
+    "materials.transcript": ("transcript", "成绩单"),
+    "materials.personal_statement": ("personal_statement", "SOP / 动机信"),
+    "materials.portfolio": ("portfolio", "作品集"),
+    "materials.degree_certificate": ("degree_certificate", "学位证明"),
+    "materials.identification": ("identification", "身份证明"),
+    "materials.recommendations": ("recommendation_letters", "推荐信"),
+}
+
+
+def canonical_evidence_key(key: str) -> str:
+    normalized = key.strip().casefold()
+    return EVIDENCE_KEY_CANONICAL_ALIASES.get(normalized, normalized)
+
+
+def standard_material_definition(
+    key: str,
+) -> Optional[tuple[StandardMaterialType, str]]:
+    return STANDARD_MATERIAL_KEYS.get(canonical_evidence_key(key))
+
+
+def material_policy_item_id(requirement_id: str, material_type: str) -> str:
+    digest = hashlib.sha256(
+        f"{requirement_id}\n{material_type}".encode("utf-8")
+    ).hexdigest()[:16]
+    return f"material-{digest}"
+
+
+def material_policy_evidence_key(item_id: str, *, quantity: bool = False) -> str:
+    prefix = "material_quantity" if quantity else "material_item"
+    return f"{prefix}.{item_id}"
+
+
+def other_policy_item_id(requirement_id: str, label: str) -> str:
+    normalized_label = " ".join(label.casefold().split())
+    digest = hashlib.sha256(
+        f"{requirement_id}\n{normalized_label}".encode("utf-8")
+    ).hexdigest()[:16]
+    return f"other-{digest}"
+
+
+def other_policy_evidence_key(item_id: str) -> str:
+    return f"other_item.{item_id}"
+
+
+def normalize_other_descriptors(
+    requirement_id: str,
+    requirement_text: str,
+    descriptors: List[GapOtherEvidenceDescriptor],
+    evidence_needs: List[GapEvidenceNeed],
+) -> List[GapOtherItem]:
+    needs_by_key = {
+        canonical_evidence_key(need.key): need for need in evidence_needs
+    }
+    requirement_folded = " ".join(requirement_text.casefold().split())
+    normalized: List[GapOtherItem] = []
+    used_source_keys: Set[str] = set()
+    for descriptor in descriptors:
+        source_key = canonical_evidence_key(descriptor.source_evidence_key)
+        source_need = needs_by_key.get(source_key)
+        if source_need is None or source_key in used_source_keys:
+            logger.warning(
+                "other_descriptor_invalid_source requirement_id=%s key=%s dropped=true",
+                requirement_id,
+                source_key,
+            )
+            continue
+        if source_need.evidence_type not in {"generic", "material_status", "material_quantity"}:
+            continue
+        options = list(descriptor.options)
+        if descriptor.value_kind in {"single_select", "multi_select"}:
+            if len(options) < 2 or any(
+                " ".join(option.casefold().split()) not in requirement_folded
+                for option in options
+            ):
+                logger.warning(
+                    "other_descriptor_unsupported_options requirement_id=%s key=%s dropped=true",
+                    requirement_id,
+                    source_key,
+                )
+                continue
+            if descriptor.value_kind == "multi_select" and not re.search(
+                r"\b(?:select|choose)\s+(?:all|any|one or more|multiple)\b|"
+                r"\bmultiple\s+(?:options?|selections?)\b|可多选|选择多个|选择所有",
+                requirement_text,
+                re.IGNORECASE,
+            ):
+                logger.warning(
+                    "other_descriptor_multi_select_not_explicit requirement_id=%s key=%s dropped=true",
+                    requirement_id,
+                    source_key,
+                )
+                continue
+        elif options:
+            options = []
+        item_id = other_policy_item_id(requirement_id, descriptor.label)
+        normalized.append(
+            GapOtherItem(
+                **descriptor.model_dump(exclude={"options", "source_evidence_key"}),
+                source_evidence_key=source_key,
+                options=options,
+                item_id=item_id,
+                evidence_key=other_policy_evidence_key(item_id),
+            )
+        )
+        used_source_keys.add(source_key)
+    return normalized
+
+
+def scope_legacy_material_evidence(
+    requirements: List["GapPlannedRequirement"],
+    evidence_by_key: Dict[str, UserEvidence],
+) -> None:
+    needs = [
+        (requirement, need)
+        for requirement in requirements
+        for need in requirement.evidence_needs
+        if need.material_type is not None and need.item_id
+    ]
+    owner_count: Dict[StandardMaterialType, int] = {}
+    for _, need in needs:
+        owner_count[need.material_type] = owner_count.get(need.material_type, 0) + 1
+    legacy_key_by_type = {
+        material_type: key
+        for key, (material_type, _) in STANDARD_MATERIAL_KEYS.items()
+    }
+    for requirement, need in needs:
+        if need.key in evidence_by_key:
+            continue
+        legacy_key = legacy_key_by_type.get(need.material_type)
+        legacy = evidence_by_key.get(legacy_key or "")
+        if legacy and (
+            owner_count.get(need.material_type) == 1
+            or requirement.requirement_id in legacy.source_requirement_ids
+        ):
+            evidence_by_key[need.key] = legacy.model_copy(update={"key": need.key})
+
+
+def canonical_evidence_value_kind(
+    key: str,
+    evidence_type: Any,
+) -> Optional[EvidenceValueKind]:
+    canonical_key = canonical_evidence_key(key)
+    key_leaf = canonical_key.rsplit(".", 1)[-1]
+    if key_leaf == "degree_classification":
+        return "categorical"
+    if key_leaf in {"gpa", "average_score"}:
+        return "numeric"
+    by_type: Dict[str, EvidenceValueKind] = {
+        "education_university": "text",
+        "education_major": "text",
+        "academic_score": "numeric",
+        "language_score": "numeric",
+        "standardized_score": "numeric",
+        "courses": "text",
+        "material_status": "boolean",
+        "material_quantity": "numeric",
+        "experience": "text",
+    }
+    return by_type.get(str(evidence_type))
+
+
+def validated_evidence_value_kind(
+    key: str,
+    evidence_type: Any,
+    model_value_kind: EvidenceValueKind,
+) -> EvidenceValueKind:
+    canonical = canonical_evidence_value_kind(key, evidence_type)
+    if canonical and canonical != model_value_kind:
+        logger.warning(
+            "gap_evidence_value_kind_conflict key=%s model=%s canonical=%s",
+            canonical_evidence_key(key),
+            model_value_kind,
+            canonical,
+        )
+    return canonical or model_value_kind
+
+
+def canonical_language_proof_kind(key: str) -> Optional[LanguageProofKind]:
+    canonical_key = canonical_evidence_key(key)
+    if canonical_key in {"ielts", "toefl"}:
+        return "scored_test"
+    if canonical_key == "education.language_medium":
+        return "medium_of_instruction"
+    return None
+
+
+def validated_language_proof_kind(
+    key: str,
+    model_proof_kind: Optional[LanguageProofKind],
+) -> Optional[LanguageProofKind]:
+    canonical = canonical_language_proof_kind(key)
+    if canonical and model_proof_kind and canonical != model_proof_kind:
+        logger.warning(
+            "gap_evidence_proof_kind_conflict key=%s model=%s canonical=%s",
+            canonical_evidence_key(key),
+            model_proof_kind,
+            canonical,
+        )
+    return canonical or model_proof_kind
+
+
+INFORMATIONAL_APPLICATION_PATTERNS = (
+    r"\bgraduate application form\b",
+    r"\bapplication fee\b",
+    r"\bapplication portal\b",
+    r"\bhow to apply\b",
+    r"\bsubmit(?:ted)?\s+(?:an?\s+)?application\s+(?:through|via)\b",
+    r"\bapply\s+(?:through|via)\b",
+    r"\b(?:materials?|documents?)\b.*\b(?:cannot|may not|must not)\s+be\s+"
+    r"(?:updated|changed|replaced)\b.*\bdeadline\b",
+    r"\bfull information\b.*\b(?:page|link|website)\b",
+)
+INFORMATIONAL_PROGRAMME_PATTERNS = (
+    r"\bfull[- ]time\b",
+    r"\bpart[- ]time\b",
+    r"\battendance\s+(?:in|at|on)\b",
+    r"\bresidence requirement\b",
+    r"\bstudy mode\b",
+    r"\bprogramme location\b",
+    r"\bprogram location\b",
+)
+INFORMATIONAL_TIMELINE_PATTERNS = (
+    r"\bapplication deadline\b",
+    r"\bapplications? open\b",
+    r"\bapplications?\s+closes?\b",
+    r"\badmission rounds?\b",
+    r"\bapplication rounds?\b",
+)
+SUPPORTING_MATERIAL_INVENTORY = (
+    (
+        "transcript",
+        r"\b(?:official\s+|academic\s+)*transcripts?\b",
+        "Official academic transcript(s) are required as supporting documents.",
+        "需要提交正式成绩单作为申请材料。",
+    ),
+    (
+        "degree_certificate",
+        r"\b(?:degree|graduation) certificates?\b|\bdiplomas?\b",
+        "A degree certificate or diploma is required as a supporting document.",
+        "需要提交学位证明作为申请材料。",
+    ),
+    (
+        "cv",
+        r"\b(?:cv|curriculum vitae|r[eé]sum[eé])\b",
+        "A current CV or résumé is required as a supporting document.",
+        "需要提交最新个人简历作为申请材料。",
+    ),
+    (
+        "recommendations",
+        r"\b(?:references?|reference letters?|recommendation letters?|letters? of recommendation)\b",
+        "Reference or recommendation letter(s) are required as supporting documents.",
+        "需要提交推荐信作为申请材料。",
+    ),
+    (
+        "personal_statement",
+        r"\b(?:personal statement|statement of purpose|motivation letter)\b",
+        "A personal statement or statement of purpose is required as a supporting document.",
+        "需要提交个人陈述作为申请材料。",
+    ),
+    (
+        "portfolio",
+        r"\b(?:portfolio|work sample)\b",
+        "A portfolio or work sample is required as a supporting document.",
+        "需要提交作品集或作品样本作为申请材料。",
+    ),
+    (
+        "identification",
+        r"\b(?:identification document|identity document|passport copy)\b",
+        "An identification document is required as a supporting document.",
+        "需要提交身份证明作为申请材料。",
+    ),
+    (
+        "programme_specific_form",
+        r"\bprogramme[- ]specific\s+(?:form|sheet|questionnaire)\b",
+        "A programme-specific form, sheet, or questionnaire is required.",
+        "需要提交项目专用表格、信息表或问卷。",
+    ),
+)
+
+
+def informational_requirement_kind(category: RequirementCategory, text: str) -> Optional[str]:
+    lowered = text.casefold()
+    if any(re.search(pattern, lowered) for pattern in INFORMATIONAL_TIMELINE_PATTERNS):
+        return "timeline"
+    if category == "other" and any(
+        re.search(pattern, lowered) for pattern in INFORMATIONAL_PROGRAMME_PATTERNS
+    ):
+        return "programme_information"
+    if any(re.search(pattern, lowered) for pattern in INFORMATIONAL_APPLICATION_PATTERNS):
+        return "application_process"
+    if category == "other" and re.search(
+        r"\b(?:see|visit|available on|linked)\b.*\b(?:page|website|link)\b",
+        lowered,
+    ):
+        return "application_process"
+    return None
+
+
+CORE_REQUIREMENT_PATTERNS = (
+    r"\b(?:is|are)\s+(?:explicitly\s+)?required\b",
+    r"\b(?:requires?|requiring)\b",
+    r"\bmust\s+(?:have|hold|achieve|obtain|complete|include|provide|submit|upload|supply)\b",
+)
+
+
+def requirement_has_explicit_matchable_core(
+    category: RequirementCategory,
+    text: str,
+) -> bool:
+    if category == "other":
+        return False
+    normalized = " ".join(text.split())
+    return any(
+        re.search(pattern, normalized, re.IGNORECASE)
+        for pattern in CORE_REQUIREMENT_PATTERNS
+    )
+
+
+def supporting_materials_in_requirement(text: str) -> List[tuple[str, str, str]]:
+    return [
+        (material_key, requirement, requirement_zh)
+        for material_key, pattern, requirement, requirement_zh in SUPPORTING_MATERIAL_INVENTORY
+        if re.search(pattern, text, re.IGNORECASE)
+    ]
+
+
+SPECIAL_INTERNAL_ROUTE_PATTERNS = (
+    r"\b(?:available|open|offered|reserved|limited|restricted)\s+"
+    r"(?:exclusively\s+|only\s+)?(?:to|for)\s+(?:current|currently\s+enrolled)\s+"
+    r"[^.;:()]{0,120}\b(?:undergraduates?|seniors?|students?)\b",
+    r"\bonly\s+(?:current|currently\s+enrolled)\s+[^.;:()]{0,120}"
+    r"\b(?:undergraduates?|seniors?|students?)\b",
+    r"\b(?:internal[- ]only|internal\s+progression\s+applicants?|"
+    r"internal\s+applicants?\s+only)\b",
+    r"仅(?:面向|适用于|开放给).{0,80}(?:本校|当前在读|内部升学).{0,40}"
+    r"(?:本科生|高年级学生|申请人)",
+)
+
+
+def requirement_route_scope(requirement_text: str) -> ApplicationRouteScope:
+    normalized = " ".join(requirement_text.split())
+    return (
+        "special_internal"
+        if any(
+            re.search(pattern, normalized, re.IGNORECASE)
+            for pattern in SPECIAL_INTERNAL_ROUTE_PATTERNS
+        )
+        else "standard"
+    )
+
+
+NAMED_APPLICATION_ROUTE_PATTERN = re.compile(
+    r"\b(?:[Tt]he\s+)?"
+    r"([A-Z][A-Za-z0-9&+./'-]*(?:\s+[A-Z][A-Za-z0-9&+./'-]*){0,6})\s+"
+    r"([Pp]athway|[Pp]rogramme|[Pp]rogram|[Rr]oute)\b"
+)
+ROUTE_IDENTITY_WRAPPERS = {"pathway", "programme", "program", "route"}
+
+
+def named_application_route_identities(requirement_text: str) -> Set[str]:
+    identities: Set[str] = set()
+    for match in NAMED_APPLICATION_ROUTE_PATTERN.finditer(requirement_text):
+        words = [*match.group(1).split(), match.group(2)]
+        while words and words[-1].casefold() in ROUTE_IDENTITY_WRAPPERS:
+            words.pop()
+        identity = " ".join(words).casefold()
+        if identity:
+            identities.add(identity)
+    return identities
 
 
 def formal_gap_requirements(
     review: TargetProgramRequirementsReview,
 ) -> List[Dict[str, Any]]:
     formal = []
+    source_requirements = [
+        (category, index, requirement)
+        for category in review.categories
+        for index, requirement in enumerate(category.requirements)
+        if requirement.verification_status
+        in {"official_verified", "model_memory_unverified", "user_supplied"}
+    ]
+    special_internal_route_identities = {
+        route_identity
+        for _, _, requirement in source_requirements
+        if requirement_route_scope(requirement.requirement) == "special_internal"
+        for route_identity in named_application_route_identities(requirement.requirement)
+    }
+    has_language_requirement = any(
+        category.category == "language" and category.requirements
+        for category in review.categories
+    )
     for category in review.categories:
         for index, requirement in enumerate(category.requirements):
             if requirement.verification_status not in {
@@ -2201,18 +3708,108 @@ def formal_gap_requirements(
                 "user_supplied",
             }:
                 continue
+            direct_route_scope = requirement_route_scope(requirement.requirement)
+            route_identities = named_application_route_identities(
+                requirement.requirement
+            )
+            inherits_named_route_scope = bool(
+                direct_route_scope == "standard"
+                and route_identities & special_internal_route_identities
+            )
+            route_scope: ApplicationRouteScope = (
+                "special_internal"
+                if direct_route_scope == "special_internal"
+                or inherits_named_route_scope
+                else "standard"
+            )
+            route_scope_source = (
+                "named_route"
+                if inherits_named_route_scope
+                else "current_requirement"
+            )
+            base = {
+                "category": category.category,
+                "requirement": requirement.requirement,
+                "requirement_zh": requirement.requirement_zh,
+                "importance": requirement.importance,
+                "requirement_verification_status": requirement.verification_status,
+                "source_url": requirement.source_url,
+                "source_cycle": requirement.source_cycle,
+                "temporal_applicability": requirement.temporal_applicability,
+                "temporal_note": requirement.temporal_note,
+                "route_scope": route_scope,
+                "excluded_reason": (
+                    "unsupported_special_internal_route"
+                    if route_scope == "special_internal"
+                    else None
+                ),
+                "route_scope_source": route_scope_source,
+            }
+            requirement_id = f"{category.category}:{index}"
+            informational_kind = informational_requirement_kind(
+                category.category,
+                requirement.requirement,
+            )
+            has_matchable_core = requirement_has_explicit_matchable_core(
+                category.category,
+                requirement.requirement,
+            )
+            supporting_materials = supporting_materials_in_requirement(
+                requirement.requirement
+            )
+            if informational_kind and supporting_materials:
+                parent_has_conditional_scope = requirement_has_explicit_conditional_scope(
+                    requirement.requirement
+                )
+                for material_key, material_text, material_text_zh in supporting_materials:
+                    formal.append(
+                        {
+                            **base,
+                            "requirement_id": f"{requirement_id}:{material_key}",
+                            "category": "materials",
+                            "requirement": material_text,
+                            "requirement_zh": material_text_zh,
+                            "gap_eligibility": "matchable",
+                            "parent_requirement_id": requirement_id,
+                            "parent_requirement_text": requirement.requirement,
+                            "parent_scope_requirement_id": f"{requirement_id}:process",
+                            "parent_has_explicit_conditional_scope": parent_has_conditional_scope,
+                            "inherits_parent_applicability": parent_has_conditional_scope,
+                            "route_scope_source": "parent",
+                        }
+                    )
+                formal.append(
+                    {
+                        **base,
+                        "requirement_id": f"{requirement_id}:process",
+                        "gap_eligibility": informational_kind,
+                        "parent_requirement_id": requirement_id,
+                        "parent_requirement_text": requirement.requirement,
+                        "parent_has_explicit_conditional_scope": parent_has_conditional_scope,
+                        "inherits_parent_applicability": False,
+                    }
+                )
+                continue
+            if has_matchable_core:
+                informational_kind = None
+            duplicate_language_material = bool(
+                has_language_requirement
+                and category.category == "materials"
+                and re.search(
+                    r"\b(?:evidence|proof) of english(?: language)? proficiency\b",
+                    requirement.requirement,
+                    re.IGNORECASE,
+                )
+            )
             formal.append(
                 {
-                    "requirement_id": f"{category.category}:{index}",
-                    "category": category.category,
-                    "requirement": requirement.requirement,
-                    "requirement_zh": requirement.requirement_zh,
-                    "importance": requirement.importance,
-                    "requirement_verification_status": requirement.verification_status,
-                    "source_url": requirement.source_url,
-                    "source_cycle": requirement.source_cycle,
-                    "temporal_applicability": requirement.temporal_applicability,
-                    "temporal_note": requirement.temporal_note,
+                    **base,
+                    "requirement_id": requirement_id,
+                    "gap_eligibility": (
+                        "duplicate_language_reference"
+                        if duplicate_language_material
+                        else informational_kind or "matchable"
+                    ),
                 }
             )
     return formal
@@ -2222,6 +3819,12 @@ def requirement_is_temporally_matchable(
     temporal_applicability: RequirementTemporalApplicability,
 ) -> bool:
     return temporal_applicability in {"target_cycle_confirmed", "undated"}
+
+
+def requirement_allows_evidence_collection(
+    temporal_applicability: RequirementTemporalApplicability,
+) -> bool:
+    return temporal_applicability != "not_yet_published"
 
 
 def temporal_gap_explanation(
@@ -2252,8 +3855,34 @@ def required_fields_for_evidence_need(
     constraint: GapDeterministicConstraint,
 ) -> List[str]:
     matching_options = [
-        option for option in constraint.options if option.key.casefold() == need.key.casefold()
+        option
+        for option in constraint.options
+        if canonical_evidence_key(option.key) == canonical_evidence_key(need.key)
     ]
+    if (
+        need.evidence_type == "standardized_score"
+        and canonical_evidence_key(need.key) == "gre"
+    ):
+        components = list(
+            dict.fromkeys(
+                option.component
+                for option in matching_options
+                if option.component is not None
+            )
+        )
+        return components or ["verbal", "quantitative", "analytical_writing"]
+    if need.evidence_type == "academic_score":
+        academic_key = canonical_evidence_key(need.key).rsplit(".", 1)[-1]
+        academic_value_kind = {
+            "degree_classification": "categorical",
+        }.get(academic_key, "numeric")
+        if academic_value_kind == "categorical" or (
+            matching_options
+            and not any(option.kind == "score" for option in matching_options)
+        ):
+            return ["description"]
+        if academic_key in {"gpa", "average_score"}:
+            return ["score", "scale"]
     if need.evidence_type in {"language_score", "standardized_score", "academic_score"}:
         fields = ["score"]
         if need.evidence_type == "language_score" and any(
@@ -2265,25 +3894,2446 @@ def required_fields_for_evidence_need(
         return ["quantity"]
     if need.evidence_type == "material_status":
         return ["status"]
-    if need.evidence_type == "experience" and any(
-        option.kind == "experience_duration" for option in matching_options
+    if need.evidence_type == "courses" and any(
+        option.kind == "course_credit" for option in matching_options
     ):
-        return ["description", "duration"]
+        return ["quantity"]
+    if need.evidence_type == "experience":
+        return ["has_experience", "experience_types", "duration", "unit"]
     return ["description"]
 
 
+def normalize_course_requirements(
+    requirement_id: str,
+    items: List[GapCourseRequirement],
+    evidence_needs: List[GapEvidenceNeed],
+) -> List[GapCourseRequirement]:
+    course_keys = {
+        canonical_evidence_key(need.key)
+        for need in evidence_needs
+        if need.evidence_type == "courses"
+    }
+    normalized = []
+    seen_courses = set()
+    for item in items:
+        evidence_key = canonical_evidence_key(item.evidence_key)
+        if evidence_key not in course_keys:
+            logger.warning(
+                "course_requirement_invalid_evidence_key requirement_id=%s key=%s dropped=true",
+                requirement_id,
+                evidence_key,
+            )
+            continue
+        dedup_key = " ".join(item.course_name.casefold().split())
+        if dedup_key in seen_courses:
+            logger.warning(
+                "course_requirement_duplicate requirement_id=%s course=%s dropped=true",
+                requirement_id,
+                item.course_name,
+            )
+            continue
+        seen_courses.add(dedup_key)
+        normalized.append(
+            item.model_copy(
+                update={
+                    "item_id": course_requirement_item_id(
+                        requirement_id, item.course_name
+                    ),
+                    "evidence_key": evidence_key,
+                }
+            )
+        )
+    return normalized
+
+
+def course_requirement_item_id(requirement_id: str, course_name: str) -> str:
+    normalized_name = " ".join(course_name.casefold().split())
+    digest = hashlib.sha256(
+        f"{requirement_id}\n{normalized_name}".encode("utf-8")
+    ).hexdigest()[:16]
+    return f"course-{digest}"
+
+
+def course_requirement_evidence_key(item_id: str) -> str:
+    return f"course_requirement.{item_id}"
+
+
+def course_requirement_credit_evidence_key(item_id: str) -> str:
+    return f"course_requirement_credit.{item_id}"
+
+
+def normalize_conditional_metadata(
+    requirement_id: str,
+    requirement_text: str,
+    metadata: GapConditionalMetadata,
+    evidence_needs: List[GapEvidenceNeed],
+) -> GapConditionalMetadata:
+    if not metadata.is_conditional:
+        if (
+            metadata.condition_text
+            or metadata.controlling_evidence_keys
+            or metadata.predicates
+            or metadata.predicate_relation != "all"
+        ):
+            logger.warning(
+                "conditional_metadata_unconditional_payload requirement_id=%s cleared=true",
+                requirement_id,
+            )
+        return GapConditionalMetadata()
+    if not metadata.condition_text:
+        logger.warning(
+            "conditional_metadata_missing_condition_text requirement_id=%s normalized=unconditional",
+            requirement_id,
+        )
+        return GapConditionalMetadata()
+    if not requirement_has_explicit_conditional_scope(requirement_text):
+        logger.warning(
+            "conditional_metadata_scope_not_explicit requirement_id=%s normalized=unconditional",
+            requirement_id,
+        )
+        return GapConditionalMetadata()
+    owned_keys = {
+        canonical_evidence_key(need.key)
+        for need in evidence_needs
+    }
+    controlling_keys = []
+    for raw_key in metadata.controlling_evidence_keys:
+        key = canonical_evidence_key(raw_key)
+        if key not in owned_keys:
+            logger.warning(
+                "conditional_metadata_invalid_evidence_key requirement_id=%s key=%s dropped=true",
+                requirement_id,
+                key,
+            )
+            continue
+        if key not in controlling_keys:
+            controlling_keys.append(key)
+    predicates = []
+    for predicate in metadata.predicates:
+        key = canonical_evidence_key(predicate.evidence_key)
+        if key not in controlling_keys:
+            logger.warning(
+                "conditional_predicate_invalid_evidence_key requirement_id=%s key=%s dropped=true",
+                requirement_id,
+                key,
+            )
+            continue
+        normalized_predicate = predicate.model_copy(update={"evidence_key": key})
+        if normalized_predicate not in predicates:
+            predicates.append(normalized_predicate)
+    return metadata.model_copy(
+        update={
+            "controlling_evidence_keys": controlling_keys,
+            "predicates": predicates,
+        }
+    )
+
+
+def requirement_has_explicit_conditional_scope(requirement_text: str) -> bool:
+    return bool(
+        re.search(
+            r"\bif\b|\bwhere applicable\b|\bonly\s+(?:for|if|when|current)\b|"
+            r"\bapplicants?\s+(?:from|with|who|choosing|selecting)\b|"
+            r"\bfor\s+(?:the\s+)?[^.;:]{0,100}\b(?:pathway|track|speciali[sz]ation|stream|route)\b|"
+            r"\bwhen\s+[^.;:]{1,100}\b(?:applies|required|selected|chosen)\b|"
+            r"如适用|仅适用于|只适用于|如果|若|选择.+(?:方向|路径|项目)",
+            requirement_text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def normalized_conditional_value(value: str) -> str:
+    return " ".join(value.casefold().split())
+
+
+def conditional_predicate_truth(
+    predicate: GapConditionalPredicate,
+    item: Optional[UserEvidence],
+) -> Optional[bool]:
+    if item is None or item.availability == "unknown":
+        return None
+    if item.availability == "known_negative":
+        return False
+    value = item.value
+    if isinstance(value, dict):
+        value = value.get("value", value.get("selected_values", value.get("description")))
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized_value = normalized_conditional_value(value)
+    normalized_expected = {
+        normalized_conditional_value(expected)
+        for expected in predicate.expected_values
+    }
+    if predicate.operator == "equals":
+        return normalized_value == next(iter(normalized_expected))
+    if predicate.operator == "in":
+        return normalized_value in normalized_expected
+    return None
+
+
+def resolve_conditional_state(
+    requirement: GapPlannedRequirement,
+    reusable_by_key: Dict[str, UserEvidence],
+) -> ConditionalApplicabilityState:
+    metadata = requirement.conditional
+    if not metadata.is_conditional:
+        return "not_conditional"
+    if not metadata.controlling_evidence_keys or not metadata.predicates:
+        return "pending"
+    truths = [
+        conditional_predicate_truth(
+            predicate,
+            reusable_by_key.get(canonical_evidence_key(predicate.evidence_key)),
+        )
+        for predicate in metadata.predicates
+    ]
+    if metadata.predicate_relation == "all":
+        if any(value is None for value in truths):
+            return "pending"
+        return "active" if all(truths) else "inactive"
+    if any(value is True for value in truths):
+        return "active"
+    if all(value is False for value in truths):
+        return "inactive"
+    return "pending"
+
+
+def conditional_question_policy_view(
+    requirements: List[GapPlannedRequirement],
+) -> List[GapPlannedRequirement]:
+    visible: List[GapPlannedRequirement] = []
+    for requirement in requirements:
+        if requirement.conditional_state in {"not_conditional", "active"}:
+            visible.append(requirement)
+            continue
+        if requirement.conditional_state == "inactive":
+            continue
+        controlling_keys = {
+            canonical_evidence_key(key)
+            for key in requirement.conditional.controlling_evidence_keys
+        }
+        if not controlling_keys:
+            continue
+        controlling_needs = [
+            need
+            for need in requirement.evidence_needs
+            if need.key in controlling_keys
+        ]
+        if not controlling_needs:
+            continue
+        visible.append(
+            requirement.model_copy(
+                update={
+                    "evidence_needs": controlling_needs,
+                    "constraint": requirement.constraint.model_copy(
+                        update={
+                            "options": [
+                                option
+                                for option in requirement.constraint.options
+                                if canonical_evidence_key(option.key) in controlling_keys
+                            ]
+                        }
+                    ),
+                    "course_requirements": [
+                        item
+                        for item in requirement.course_requirements
+                        if course_requirement_evidence_key(item.item_id)
+                        in controlling_keys
+                        or course_requirement_credit_evidence_key(item.item_id)
+                        in controlling_keys
+                    ],
+                    "other_items": [
+                        item
+                        for item in requirement.other_items
+                        if item.evidence_key in controlling_keys
+                    ],
+                }
+            )
+        )
+    return visible
+
+
+def friendly_evidence_name(
+    key: str,
+    need: Optional[GapEvidenceNeed] = None,
+) -> str:
+    canonical_key = canonical_evidence_key(key)
+    suffix = canonical_key.rsplit(".", 1)[-1]
+    labels = {
+        "degree_classification": "学位等级",
+        "gpa": "GPA",
+        "average_score": "平均分",
+        "ielts": "IELTS 成绩",
+        "toefl": "TOEFL 成绩",
+        "university": "本科院校",
+        "major": "本科专业",
+        "experience": "相关经历",
+    }
+    if suffix in labels:
+        return labels[suffix]
+    if need and need.label.strip():
+        label = need.label.strip()
+        if label.casefold() != canonical_key and not re.fullmatch(
+            r"[a-z0-9_.-]+",
+            label.casefold(),
+        ):
+            return label
+    return "相关信息"
+
+
+def safe_owned_question_prompt(needs: List[GapEvidenceNeed]) -> str:
+    names = list(
+        dict.fromkeys(friendly_evidence_name(need.key, need) for need in needs)
+    )
+    if names == ["本科院校"]:
+        return "你的本科院校是什么？"
+    if names == ["本科专业"]:
+        return "你的本科专业是什么？"
+    relation = needs[0].group_relation if needs else "all"
+    if len(names) == 1:
+        return f"请提供你的{names[0]}。"
+    if relation == "any":
+        return f"请提供你可用的{'、'.join(names)}信息。"
+    return f"请补充以下信息：{'、'.join(names)}。"
+
+
+def invalid_schema_fallback_prompt(
+    evidence_keys: List[str],
+    needs_by_key: Optional[Dict[str, GapEvidenceNeed]],
+) -> str:
+    names = list(
+        dict.fromkeys(
+            friendly_evidence_name(
+                key,
+                needs_by_key.get(key) if needs_by_key else None,
+            )
+            for key in evidence_keys
+        )
+    )
+    if len(names) == 1:
+        return f"请提供你的{names[0]}。"
+    return f"请补充以下信息：{'、'.join(names)}。"
+
+
+def question_schema_snapshot(question: GapPlannerQuestion) -> Dict[str, Any]:
+    return {
+        "question_id": question.question_id,
+        "requirement_id": question.requirement_id,
+        "prompt": question.prompt or question.question,
+        "expected_evidence_keys": list(question.expected_evidence_keys),
+        "control_type": question.control_type,
+        "options": [option.model_dump(mode="json") for option in question.options],
+        "fields": [field.model_dump(mode="json") for field in question.fields],
+        "validation": question.validation.model_dump(mode="json"),
+    }
+
+
+def log_question_generation_diagnostics(
+    event: str,
+    diagnostics: GapQuestionGenerationDiagnostics,
+) -> None:
+    logger.warning(
+        "question_generation_diagnostics event=%s data=%s",
+        event,
+        json.dumps(diagnostics.model_dump(mode="json"), ensure_ascii=False),
+    )
+
+
+def invalid_structured_question_schema(
+    question: GapPlannerQuestion,
+    evidence_keys: List[str],
+    *,
+    evidence_group: Optional[str],
+    group_relation: Literal["all", "any"],
+    error_code: str,
+    failure_stage: QuestionGenerationFailureStage,
+) -> GapPlannerQuestion:
+    existing = question.generation_diagnostics
+    base = existing or GapQuestionGenerationDiagnostics()
+    diagnostic_update: Dict[str, Any] = {
+        "requirement_id": question.requirement_id,
+        "allowed_evidence_keys": list(evidence_keys),
+        "group_relation": group_relation,
+    }
+    if failure_stage == "repair_schema_invalid":
+        diagnostic_update.update(
+            {
+                "repair_schema": question_schema_snapshot(question),
+                "repair_failure_stage": failure_stage,
+                "repair_validator_error": error_code,
+            }
+        )
+    else:
+        diagnostic_update.update(
+            {
+                "initial_schema": (
+                    base.initial_schema
+                    if base.initial_schema is not None
+                    else question_schema_snapshot(question)
+                ),
+                "initial_failure_stage": base.initial_failure_stage or failure_stage,
+                "initial_validator_error": base.initial_validator_error or error_code,
+            }
+        )
+    diagnostics = base.model_copy(update=diagnostic_update)
+    logger.warning(
+        "gap_question_schema_invalid question_id=%s requirement_id=%s stage=%s error_code=%s",
+        question.question_id,
+        question.requirement_id,
+        failure_stage,
+        error_code,
+    )
+    log_question_generation_diagnostics(
+        "repair_invalid" if failure_stage == "repair_schema_invalid" else "initial_invalid",
+        diagnostics,
+    )
+    return question.model_copy(
+        update={
+            "evidence_keys": list(evidence_keys),
+            "expected_evidence_keys": list(evidence_keys),
+            "allowed_evidence_keys": list(evidence_keys),
+            "evidence_group": evidence_group,
+            "group_relation": group_relation,
+            "schema_status": "invalid",
+            "schema_error_code": error_code,
+            "generation_diagnostics": diagnostics,
+        }
+    )
+
+
+def fallback_question_schema(
+    question: GapPlannerQuestion,
+    evidence_keys: List[str],
+    *,
+    evidence_group: Optional[str] = None,
+    error_code: Optional[str] = None,
+    needs_by_key: Optional[Dict[str, GapEvidenceNeed]] = None,
+) -> GapPlannerQuestion:
+    if error_code:
+        logger.warning(
+            "gap_question_schema_invalid question_id=%s error_code=%s fallback=text_fallback",
+            question.question_id,
+            error_code,
+        )
+    prompt = (
+        invalid_schema_fallback_prompt(evidence_keys, needs_by_key)
+        if error_code
+        else question.prompt or question.question
+    )
+    group_relations = {
+        needs_by_key[key].group_relation
+        for key in evidence_keys
+        if needs_by_key and key in needs_by_key
+    }
+    group_relation = (
+        group_relations.pop() if len(group_relations) == 1 else question.group_relation
+    )
+    return question.model_copy(
+        update={
+            "question": prompt,
+            "prompt": prompt,
+            "evidence_keys": evidence_keys,
+            "expected_evidence_keys": evidence_keys,
+            "allowed_evidence_keys": evidence_keys,
+            "evidence_group": evidence_group,
+            "group_relation": group_relation,
+            "control_type": "text_fallback",
+            "options": [],
+            "fields": [],
+            "validation": GapQuestionValidation(required=True),
+            "allow_unknown": True,
+            "allow_negative": True,
+            "allow_other": True,
+            "schema_status": "fallback",
+            "schema_error_code": error_code or "text_fallback_not_allowed",
+        }
+    )
+
+
+def normalize_question_schema(
+    question: GapPlannerQuestion,
+    evidence_keys: List[str],
+    needs_by_key: Dict[str, GapEvidenceNeed],
+    reusable_by_key: Dict[str, UserEvidence],
+    *,
+    failure_stage: QuestionGenerationFailureStage = "initial_schema_invalid",
+) -> GapPlannerQuestion:
+    canonical_keys = list(
+        dict.fromkeys(canonical_evidence_key(key) for key in evidence_keys)
+    )
+    evidence_groups = {
+        needs_by_key[key].evidence_group
+        for key in canonical_keys
+        if key in needs_by_key and needs_by_key[key].evidence_group
+    }
+    evidence_group = evidence_groups.pop() if len(evidence_groups) == 1 else None
+    group_relations = {
+        needs_by_key[key].group_relation
+        for key in canonical_keys
+        if key in needs_by_key
+    }
+    group_relation: Literal["all", "any"] = (
+        group_relations.pop() if len(group_relations) == 1 else "all"
+    )
+    structured_control_types = {
+        "boolean",
+        "boolean_group",
+        "experience_form",
+        "single_select",
+        "multi_select",
+        "number",
+        "number_group",
+        "date",
+        "short_text",
+    }
+    if question.control_type not in structured_control_types:
+        return invalid_structured_question_schema(
+            question,
+            canonical_keys,
+            evidence_group=evidence_group,
+            group_relation=group_relation,
+            error_code=(
+                "text_fallback_not_allowed"
+                if question.control_type == "text_fallback"
+                else "invalid_control_type"
+            ),
+            failure_stage=failure_stage,
+        )
+    if (
+        question.control_type in {"boolean_group", "experience_form", "short_text"}
+        and not question.question_id.startswith("policy:")
+    ):
+        return invalid_structured_question_schema(
+            question,
+            canonical_keys,
+            evidence_group=evidence_group,
+            group_relation=group_relation,
+            error_code="backend_control_only",
+            failure_stage=failure_stage,
+        )
+
+    language_selector_keys = {
+        key
+        for key in canonical_keys
+        if needs_by_key[key].evidence_type == "language_score"
+        or key == "education.language_medium"
+    }
+    is_language_proof_selector = (
+        (
+            group_relation == "any"
+            or (group_relation == "all" and len(canonical_keys) == 1)
+        )
+        and bool(canonical_keys)
+        and question.control_type == "single_select"
+        and bool(question.options)
+        and language_selector_keys == set(canonical_keys)
+        and any(
+            needs_by_key[key].evidence_type == "language_score"
+            for key in canonical_keys
+        )
+    )
+    if is_language_proof_selector:
+        normalized_options = []
+        seen_option_values = set()
+        option_keys = set()
+        for option in question.options:
+            key = canonical_evidence_key(option.evidence_key or "")
+            if key not in canonical_keys or option.value in seen_option_values:
+                return invalid_structured_question_schema(
+                    question,
+                    canonical_keys,
+                    evidence_group=evidence_group,
+                    group_relation=group_relation,
+                    error_code="invalid_evidence_key",
+                    failure_stage=failure_stage,
+                )
+            need = needs_by_key[key]
+            evidence_value = option.evidence_value
+            if need.evidence_type != "language_score":
+                required_fields = set(need.required_fields or ["description"])
+                if "description" in required_fields:
+                    evidence_value = {"description": option.label}
+                elif "status" in required_fields:
+                    evidence_value = {"status": True}
+                else:
+                    return invalid_structured_question_schema(
+                        question,
+                        canonical_keys,
+                        evidence_group=evidence_group,
+                        group_relation=group_relation,
+                        error_code="invalid_option_value",
+                        failure_stage=failure_stage,
+                    )
+            normalized_options.append(
+                option.model_copy(
+                    update={"evidence_key": key, "evidence_value": evidence_value}
+                )
+            )
+            seen_option_values.add(option.value)
+            option_keys.add(key)
+        if option_keys != set(canonical_keys):
+            return invalid_structured_question_schema(
+                question,
+                canonical_keys,
+                evidence_group=evidence_group,
+                group_relation=group_relation,
+                error_code="missing_control_binding",
+                failure_stage=failure_stage,
+            )
+        diagnostics = (
+            question.generation_diagnostics
+            or GapQuestionGenerationDiagnostics(
+                requirement_id=question.requirement_id,
+                allowed_evidence_keys=canonical_keys,
+                group_relation=group_relation,
+                initial_schema=question_schema_snapshot(question),
+            )
+        )
+        return question.model_copy(
+            update={
+                "question": question.prompt or question.question,
+                "prompt": question.prompt or question.question,
+                "evidence_keys": canonical_keys,
+                "expected_evidence_keys": canonical_keys,
+                "allowed_evidence_keys": canonical_keys,
+                "evidence_group": evidence_group,
+                "group_relation": group_relation,
+                "control_type": "single_select",
+                "options": normalized_options,
+                "fields": [],
+                "validation": GapQuestionValidation(
+                    required=True,
+                    min_selections=1,
+                    max_selections=1,
+                ),
+                "allow_unknown": True,
+                "allow_negative": True,
+                "schema_status": "valid",
+                "schema_error_code": None,
+                "generation_diagnostics": diagnostics,
+            }
+        )
+
+    allowed_paths: Dict[str, set[str]] = {}
+    requirement_paths: Dict[str, set[str]] = {}
+    for key in canonical_keys:
+        need = needs_by_key[key]
+        requirement_paths[key] = set(need.required_fields or ["description"])
+        existing = reusable_by_key.get(key)
+        missing = (
+            missing_evidence_fields(need, existing.value)
+            if existing and existing.availability == "known"
+            else list(need.required_fields or ["description"])
+        )
+        allowed_paths[key] = set(missing)
+
+    normalized_fields = []
+    seen_field_ids = set()
+    for field in question.fields:
+        key = canonical_evidence_key(field.evidence_key)
+        if key not in canonical_keys or field.field_id in seen_field_ids:
+            logger.warning(
+                "invalid_gap_question_field_reference question_id=%s field_id=%s status=invalid",
+                question.question_id,
+                field.field_id,
+            )
+            return invalid_structured_question_schema(
+                question,
+                canonical_keys,
+                evidence_group=evidence_group,
+                group_relation=group_relation,
+                error_code="invalid_evidence_key",
+                failure_stage=failure_stage,
+            )
+        if field.value_path not in requirement_paths[key]:
+            logger.warning(
+                "invalid_gap_question_value_path question_id=%s key=%s path=%s status=invalid",
+                question.question_id,
+                key,
+                field.value_path,
+            )
+            return invalid_structured_question_schema(
+                question,
+                canonical_keys,
+                evidence_group=evidence_group,
+                group_relation=group_relation,
+                error_code="invalid_value_path",
+                failure_stage=failure_stage,
+            )
+        if field.value_path not in allowed_paths[key]:
+            continue
+        normalized_fields.append(field.model_copy(update={"evidence_key": key}))
+        seen_field_ids.add(field.field_id)
+
+    normalized_options = []
+    seen_option_values = set()
+    for option in question.options:
+        key = canonical_evidence_key(option.evidence_key or "")
+        if not key and len(canonical_keys) == 1:
+            key = canonical_keys[0]
+        if key not in canonical_keys or option.value in seen_option_values:
+            logger.warning(
+                "invalid_gap_question_option_reference question_id=%s value=%r status=invalid",
+                question.question_id,
+                option.value,
+            )
+            return invalid_structured_question_schema(
+                question,
+                canonical_keys,
+                evidence_group=evidence_group,
+                group_relation=group_relation,
+                error_code="invalid_evidence_key",
+                failure_stage=failure_stage,
+            )
+        try:
+            json.dumps(option.evidence_value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return invalid_structured_question_schema(
+                question,
+                canonical_keys,
+                evidence_group=evidence_group,
+                group_relation=group_relation,
+                error_code="invalid_option_value",
+                failure_stage=failure_stage,
+            )
+        normalized_options.append(option.model_copy(update={"evidence_key": key}))
+        seen_option_values.add(option.value)
+
+    controls_requiring_fields = {
+        "boolean", "boolean_group", "number", "number_group", "date", "short_text"
+    }
+    controls_requiring_options = {"single_select", "multi_select"}
+    if (
+        question.control_type in controls_requiring_fields
+        and not normalized_fields
+    ) or (
+        question.control_type in controls_requiring_options
+        and not normalized_options
+    ):
+        logger.warning(
+            "incomplete_gap_question_schema question_id=%s control=%s status=invalid",
+            question.question_id,
+            question.control_type,
+        )
+        return invalid_structured_question_schema(
+            question,
+            canonical_keys,
+            evidence_group=evidence_group,
+            group_relation=group_relation,
+            error_code="missing_control_binding",
+            failure_stage=failure_stage,
+        )
+    if question.control_type in {"boolean", "number", "date", "short_text"} and len(
+        normalized_fields
+    ) != 1:
+        logger.warning(
+            "invalid_gap_question_field_count question_id=%s control=%s status=invalid",
+            question.question_id,
+            question.control_type,
+        )
+        return invalid_structured_question_schema(
+            question,
+            canonical_keys,
+            evidence_group=evidence_group,
+            group_relation=group_relation,
+            error_code="invalid_control_binding",
+            failure_stage=failure_stage,
+        )
+    coverage_by_key: Dict[str, set[str]] = {
+        key: set() for key in canonical_keys
+    }
+    for field in normalized_fields:
+        coverage_by_key[field.evidence_key].add(field.value_path)
+    for option in normalized_options:
+        key = option.evidence_key or ""
+        if isinstance(option.evidence_value, dict):
+            coverage_by_key[key].update(
+                path
+                for path in option.evidence_value
+                if path in requirement_paths[key]
+            )
+            subscores = option.evidence_value.get("subscores")
+            if isinstance(subscores, dict):
+                coverage_by_key[key].update(
+                    path for path in subscores if path in requirement_paths[key]
+                )
+        elif "description" in requirement_paths[key]:
+            coverage_by_key[key].add("description")
+
+    if group_relation == "all":
+        satisfiable = all(
+            allowed_paths[key].issubset(coverage_by_key[key])
+            for key in canonical_keys
+        )
+    else:
+        satisfiable = any(
+            allowed_paths[key]
+            and allowed_paths[key].issubset(coverage_by_key[key])
+            for key in canonical_keys
+        )
+    if not satisfiable:
+        return invalid_structured_question_schema(
+            question,
+            canonical_keys,
+            evidence_group=evidence_group,
+            group_relation=group_relation,
+            error_code="unsatisfied_required_slots",
+            failure_stage=failure_stage,
+        )
+
+    safe_validation = question.validation.model_copy(
+        update={
+            "minimum": None,
+            "maximum": None,
+            "min_selections": (
+                1
+                if question.control_type in {"single_select", "multi_select"}
+                and question.validation.required
+                else None
+            ),
+            "max_selections": (
+                1 if question.control_type == "single_select" else None
+            ),
+        }
+    )
+    diagnostics = (
+        question.generation_diagnostics
+        or GapQuestionGenerationDiagnostics(
+            requirement_id=question.requirement_id,
+            allowed_evidence_keys=canonical_keys,
+            group_relation=group_relation,
+            initial_schema=question_schema_snapshot(question),
+        )
+    )
+    is_conditional_controller = bool(question.conditional_controller_bindings)
+    terminal_actions_disabled = question.control_type in {
+        "boolean_group", "experience_form", "short_text"
+    } or (
+        question.question_id.startswith("policy:")
+        and not is_conditional_controller
+        and bool(canonical_keys)
+        and all(
+            needs_by_key[key].evidence_type
+            in {"material_status", "material_quantity"}
+            or needs_by_key[key].other_value_kind is not None
+            for key in canonical_keys
+        )
+    )
+    return question.model_copy(
+        update={
+            "question": question.prompt or question.question,
+            "prompt": question.prompt or question.question,
+            "evidence_keys": canonical_keys,
+            "expected_evidence_keys": canonical_keys,
+            "allowed_evidence_keys": canonical_keys,
+            "evidence_group": evidence_group,
+            "group_relation": group_relation,
+            "options": normalized_options,
+            "fields": normalized_fields,
+            "validation": safe_validation,
+            # Terminal states are system-owned actions, not model-authored options.
+            # A course checklist encodes explicit true/false per row, so neither
+            # terminal action is part of that deterministic contract.
+            "allow_unknown": not terminal_actions_disabled,
+            "allow_negative": not terminal_actions_disabled,
+            "schema_status": "valid",
+            "schema_error_code": None,
+            "generation_diagnostics": diagnostics,
+        }
+    )
+
+
+GapPlannerFailureKind = Literal[
+    "generation_incomplete",
+    "malformed_json",
+    "schema_validation_error",
+    "business_validation_error",
+]
+
+
+class GapPlannerOutputError(Exception):
+    def __init__(
+        self,
+        kind: GapPlannerFailureKind,
+        message: str,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+def coerce_deepseek_text_result(value: Any) -> DeepSeekTextResult:
+    if isinstance(value, DeepSeekTextResult):
+        return value
+    return DeepSeekTextResult(content=value if isinstance(value, str) else "")
+
+
+def gap_planner_json_failure_kind(
+    error: json.JSONDecodeError,
+    result: DeepSeekTextResult,
+) -> GapPlannerFailureKind:
+    stop_reason = (result.stop_reason or "").casefold()
+    incomplete_markers = (
+        "unterminated string",
+        "expecting value",
+        "expecting ',' delimiter",
+        "expecting property name enclosed in double quotes",
+    )
+    near_end = error.pos >= max(0, len(result.content.rstrip()) - 2)
+    if (
+        not result.content.strip()
+        or stop_reason in {"length", "max_tokens", "max_output_tokens"}
+        or (near_end and any(marker in error.msg.casefold() for marker in incomplete_markers))
+    ):
+        return "generation_incomplete"
+    return "malformed_json"
+
+
+def parse_gap_planner_output(result: DeepSeekTextResult) -> GapPlannerLLMOutput:
+    try:
+        payload = json.loads(result.content)
+    except json.JSONDecodeError as error:
+        kind = gap_planner_json_failure_kind(error, result)
+        logger.warning(
+            "gap_planner_parse_failed kind=%s parse_error_type=%s stop_reason=%s final_text_length=%d error_position=%d",
+            kind,
+            type(error).__name__,
+            result.stop_reason,
+            len(result.content),
+            error.pos,
+        )
+        raise GapPlannerOutputError(kind, str(error)) from error
+    try:
+        return GapPlannerLLMOutput.model_validate(payload)
+    except ValidationError as error:
+        logger.warning(
+            "gap_planner_parse_failed kind=schema_validation_error parse_error_type=%s stop_reason=%s final_text_length=%d validation_error_count=%d",
+            type(error).__name__,
+            result.stop_reason,
+            len(result.content),
+            len(error.errors()),
+        )
+        raise GapPlannerOutputError("schema_validation_error", str(error)) from error
+
+
+def validate_gap_planner_business_output(
+    output: GapPlannerLLMOutput,
+    allowed_requirement_ids: Set[str],
+) -> None:
+    requirement_ids = [item.requirement_id for item in output.requirements]
+    invalid_ids = sorted(set(requirement_ids) - allowed_requirement_ids)
+    duplicate_ids = sorted(
+        requirement_id
+        for requirement_id in set(requirement_ids)
+        if requirement_ids.count(requirement_id) > 1
+    )
+    if invalid_ids or duplicate_ids:
+        logger.warning(
+            "gap_planner_business_validation_failed invalid_requirement_id_count=%d duplicate_requirement_id_count=%d",
+            len(invalid_ids),
+            len(duplicate_ids),
+        )
+        raise GapPlannerOutputError(
+            "business_validation_error",
+            "Gap Planner returned invalid or duplicate requirement identifiers",
+        )
+
+
+def gap_planner_prompt_payload(
+    request: GapPlanRequest,
+    formal_requirements: List[Dict[str, Any]],
+    reusable: List[UserEvidence],
+) -> Dict[str, Any]:
+    return {
+        "target_program": {
+            "university": request.target_program.university,
+            "program": request.target_program.program,
+            "intended_entry_year": request.target_program.intended_entry_year,
+            "intended_entry_term": request.target_program.intended_entry_term,
+        },
+        "requirements": [
+            {
+                key: item.get(key)
+                for key in (
+                    "requirement_id",
+                    "category",
+                    "requirement",
+                    "importance",
+                    "requirement_verification_status",
+                    "source_cycle",
+                    "temporal_applicability",
+                    "temporal_note",
+                    "gap_eligibility",
+                    "parent_requirement_id",
+                    "parent_requirement_text",
+                    "parent_has_explicit_conditional_scope",
+                    "inherits_parent_applicability",
+                )
+            }
+            for item in formal_requirements
+        ],
+        "canonical_user_evidence": [
+            {
+                "evidence_type": item.evidence_type,
+                "key": canonical_evidence_key(item.key),
+                "value": item.value,
+                "availability": item.availability,
+            }
+            for item in reusable
+        ],
+    }
+
+
+def materialize_gap_planner_output(
+    output: GapPlannerLLMOutput,
+) -> GapPlannerOutput:
+    return GapPlannerOutput(
+        requirements=[
+            GapPlannerRequirementDraft(
+                requirement_id=item.requirement_id,
+                matchable=item.matchable,
+                informational_reason=item.informational_reason,
+                match_strategy=item.match_strategy,
+                evidence_needs=[
+                    GapEvidenceNeed(**need.model_dump())
+                    for need in item.evidence_needs
+                ],
+                constraint=item.constraint,
+                course_requirements=list(item.course_requirements),
+                conditional=item.conditional,
+                other_items=list(item.other_items),
+            )
+            for item in output.requirements
+        ],
+        questions=[
+            GapPlannerQuestion(**question.model_dump())
+            for question in output.questions
+        ],
+    )
+
+
+def missing_structured_question(
+    requirement: GapPlannedRequirement,
+    missing_needs: List[GapEvidenceNeed],
+    *,
+    prompt: str,
+) -> GapPlannerQuestion:
+    allowed_keys = [need.key for need in missing_needs]
+    group_relations = {need.group_relation for need in missing_needs}
+    group_relation: Literal["all", "any"] = (
+        group_relations.pop() if len(group_relations) == 1 else "all"
+    )
+    evidence_groups = {
+        need.evidence_group for need in missing_needs if need.evidence_group
+    }
+    diagnostics = GapQuestionGenerationDiagnostics(
+        requirement_id=requirement.requirement_id,
+        allowed_evidence_keys=allowed_keys,
+        group_relation=group_relation,
+        initial_schema=None,
+        initial_failure_stage="initial_schema_missing",
+        initial_validator_error="initial_schema_missing",
+    )
+    log_question_generation_diagnostics("initial_missing", diagnostics)
+    return GapPlannerQuestion(
+        question_id=f"q:{requirement.requirement_id}",
+        requirement_id=requirement.requirement_id,
+        question=prompt,
+        prompt=prompt,
+        evidence_keys=allowed_keys,
+        expected_evidence_keys=allowed_keys,
+        allowed_evidence_keys=allowed_keys,
+        evidence_group=(
+            evidence_groups.pop() if len(evidence_groups) == 1 else None
+        ),
+        group_relation=group_relation,
+        # Internal repair target only; it is never rendered before repair.
+        control_type="boolean",
+        schema_status="invalid",
+        schema_error_code="initial_schema_missing",
+        generation_diagnostics=diagnostics,
+    )
+
+
+def gap_question_generation_error(
+    question: GapPlannerQuestion,
+    *,
+    final_failure_stage: Optional[QuestionGenerationFailureStage] = None,
+    repair_validator_error: Optional[str] = None,
+) -> GapPlannerQuestion:
+    diagnostics = question.generation_diagnostics or GapQuestionGenerationDiagnostics(
+        requirement_id=question.requirement_id,
+        allowed_evidence_keys=list(question.allowed_evidence_keys),
+        group_relation=question.group_relation,
+        initial_schema=question_schema_snapshot(question),
+    )
+    final_stage = (
+        final_failure_stage
+        or diagnostics.repair_failure_stage
+        or diagnostics.initial_failure_stage
+        or "normalization_failed"
+    )
+    diagnostics = diagnostics.model_copy(
+        update={
+            "repair_validator_error": (
+                repair_validator_error or diagnostics.repair_validator_error
+            ),
+            "final_failure_stage": final_stage,
+        }
+    )
+    log_question_generation_diagnostics("final_failure", diagnostics)
+    return question.model_copy(
+        update={
+            "question": "这个问题暂时无法生成，请重新尝试。",
+            "prompt": "这个问题暂时无法生成，请重新尝试。",
+            "control_type": "boolean",
+            "options": [],
+            "fields": [],
+            "allow_unknown": False,
+            "allow_negative": False,
+            "allow_other": False,
+            "schema_status": "generation_error",
+            "repair_attempts": 1,
+            "generation_diagnostics": diagnostics,
+        }
+    )
+
+
+def gap_question_repair_context(
+    question: GapPlannerQuestion,
+    requirement: GapPlannedRequirement,
+    reusable_by_key: Dict[str, UserEvidence],
+) -> Dict[str, Any]:
+    needs_by_key = {need.key: need for need in requirement.evidence_needs}
+    allowed_keys = [
+        key
+        for key in question.allowed_evidence_keys
+        if key in needs_by_key
+    ]
+    current_missing = []
+    for key in allowed_keys:
+        need = needs_by_key[key]
+        existing = reusable_by_key.get(key)
+        missing_fields = (
+            missing_evidence_fields(need, existing.value)
+            if existing and existing.availability == "known"
+            else list(need.required_fields or ["description"])
+        )
+        current_missing.extend(f"{key}.{field}" for field in missing_fields)
+    diagnostics = question.generation_diagnostics
+    return {
+        "question_id": question.question_id,
+        "requirement_id": requirement.requirement_id,
+        "requirement_summary": requirement.requirement,
+        "allowed_evidence_keys": allowed_keys,
+        "evidence_group": question.evidence_group,
+        "group_relation": question.group_relation,
+        "current_missing_evidence": current_missing,
+        "invalid_schema": (
+            diagnostics.initial_schema
+            if diagnostics
+            else question_schema_snapshot(question)
+        ),
+        "validator_error_reason": (
+            diagnostics.initial_validator_error
+            if diagnostics
+            else question.schema_error_code
+        ),
+        "allowed_control_types": [
+            "boolean",
+            "single_select",
+            "multi_select",
+            "number",
+            "number_group",
+            "date",
+        ],
+    }
+
+
+def question_with_repair_failure(
+    question: GapPlannerQuestion,
+    stage: QuestionGenerationFailureStage,
+    error_code: str,
+    *,
+    repair_schema: Optional[Dict[str, Any]] = None,
+) -> GapPlannerQuestion:
+    diagnostics = question.generation_diagnostics or GapQuestionGenerationDiagnostics(
+        requirement_id=question.requirement_id,
+        allowed_evidence_keys=list(question.allowed_evidence_keys),
+        group_relation=question.group_relation,
+        initial_schema=question_schema_snapshot(question),
+    )
+    diagnostics = diagnostics.model_copy(
+        update={
+            "repair_schema": repair_schema,
+            "repair_failure_stage": stage,
+            "repair_validator_error": error_code,
+        }
+    )
+    log_question_generation_diagnostics("repair_failure", diagnostics)
+    return question.model_copy(
+        update={
+            "schema_status": "invalid",
+            "schema_error_code": error_code,
+            "generation_diagnostics": diagnostics,
+        }
+    )
+
+
+def normalize_question_schema_safely(
+    question: GapPlannerQuestion,
+    evidence_keys: List[str],
+    needs_by_key: Dict[str, GapEvidenceNeed],
+    reusable_by_key: Dict[str, UserEvidence],
+    *,
+    repair_phase: bool = False,
+) -> GapPlannerQuestion:
+    try:
+        return normalize_question_schema(
+            question,
+            evidence_keys,
+            needs_by_key,
+            reusable_by_key,
+            failure_stage=(
+                "repair_schema_invalid" if repair_phase else "initial_schema_invalid"
+            ),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        logger.warning(
+            "gap_question_normalization_failed question_id=%s requirement_id=%s error_type=%s",
+            question.question_id,
+            question.requirement_id,
+            type(error).__name__,
+        )
+        if repair_phase:
+            return question_with_repair_failure(
+                question,
+                "normalization_failed",
+                type(error).__name__,
+                repair_schema=question_schema_snapshot(question),
+            )
+        group_relations = {
+            needs_by_key[key].group_relation
+            for key in evidence_keys
+            if key in needs_by_key
+        }
+        group_relation: Literal["all", "any"] = (
+            group_relations.pop() if len(group_relations) == 1 else "all"
+        )
+        evidence_groups = {
+            needs_by_key[key].evidence_group
+            for key in evidence_keys
+            if key in needs_by_key and needs_by_key[key].evidence_group
+        }
+        return invalid_structured_question_schema(
+            question,
+            evidence_keys,
+            evidence_group=(
+                evidence_groups.pop() if len(evidence_groups) == 1 else None
+            ),
+            group_relation=group_relation,
+            error_code=type(error).__name__,
+            failure_stage="normalization_failed",
+        )
+
+
+ACADEMIC_POLICY_KEYS = {
+    "degree_classification",
+    "gpa",
+    "average_score",
+}
+
+
+def build_backend_academic_questions(
+    planned: List[GapPlannedRequirement],
+    reusable_by_key: Dict[str, UserEvidence],
+) -> tuple[List[GapPlannerQuestion], Set[str]]:
+    questions: List[GapPlannerQuestion] = []
+    covered_keys: Set[str] = set()
+    for requirement in planned:
+        needs_by_key = {need.key: need for need in requirement.evidence_needs}
+        supported = [
+            need
+            for need in requirement.evidence_needs
+            if need.evidence_type == "academic_score"
+            and canonical_evidence_key(need.key).rsplit(".", 1)[-1]
+            in ACADEMIC_POLICY_KEYS
+        ]
+        if not supported:
+            continue
+        any_groups: Dict[str, List[GapEvidenceNeed]] = {}
+        for need in requirement.evidence_needs:
+            if need.evidence_group and need.group_relation == "any":
+                any_groups.setdefault(need.evidence_group, []).append(need)
+        satisfied_groups = {
+            group
+            for group, group_needs in any_groups.items()
+            if any(need.already_known for need in group_needs)
+        }
+        missing_supported = []
+        for need in supported:
+            covered_keys.add(need.key)
+            if need.already_known or need.evidence_group in satisfied_groups:
+                continue
+            missing_supported.append(need)
+
+        classification_needs = [
+            need
+            for need in missing_supported
+            if canonical_evidence_key(need.key).rsplit(".", 1)[-1]
+            == "degree_classification"
+        ]
+        for need in classification_needs:
+            question = GapPlannerQuestion(
+                question_id=f"policy:{requirement.requirement_id}:degree-classification",
+                requirement_id=requirement.requirement_id,
+                prompt="请选择你的学位等级。",
+                expected_evidence_keys=[need.key],
+                control_type="single_select",
+                options=[
+                    GapQuestionOption(
+                        value=value,
+                        label=label,
+                        evidence_key=need.key,
+                        evidence_value={"description": description},
+                    )
+                    for value, label, description in (
+                        ("first", "First", "First"),
+                        ("upper_second", "2:1 / Upper Second", "2:1"),
+                        ("lower_second", "2:2 / Lower Second", "2:2"),
+                        ("third", "Third", "Third"),
+                        ("other", "Other", "Other"),
+                    )
+                ],
+                allow_other=True,
+            )
+            normalized = normalize_question_schema_safely(
+                question,
+                [need.key],
+                needs_by_key,
+                reusable_by_key,
+            )
+            if normalized.schema_status != "valid":
+                raise RuntimeError(
+                    "Backend Academic Question Policy produced an invalid degree classification schema"
+                )
+            questions.append(normalized)
+
+        numeric_needs = [
+            need
+            for need in missing_supported
+            if canonical_evidence_key(need.key).rsplit(".", 1)[-1]
+            in {"gpa", "average_score"}
+        ]
+        numeric_groups: Dict[str, List[GapEvidenceNeed]] = {}
+        for need in numeric_needs:
+            group_key = need.evidence_group or f"{requirement.requirement_id}:{need.key}"
+            numeric_groups.setdefault(group_key, []).append(need)
+        for index, group_needs in enumerate(numeric_groups.values()):
+            fields = []
+            for need in group_needs:
+                key_leaf = canonical_evidence_key(need.key).rsplit(".", 1)[-1]
+                label = "GPA" if key_leaf == "gpa" else "平均分"
+                fields.extend(
+                    [
+                        GapQuestionField(
+                            field_id=f"{key_leaf}-score",
+                            label=f"{label}分数",
+                            evidence_key=need.key,
+                            value_path="score",
+                        ),
+                        GapQuestionField(
+                            field_id=f"{key_leaf}-scale",
+                            label=f"{label}满分",
+                            evidence_key=need.key,
+                            value_path="scale",
+                        ),
+                    ]
+                )
+            labels = [
+                "GPA"
+                if canonical_evidence_key(need.key).rsplit(".", 1)[-1] == "gpa"
+                else "平均分"
+                for need in group_needs
+            ]
+            question = GapPlannerQuestion(
+                question_id=f"policy:{requirement.requirement_id}:academic-numeric:{index}",
+                requirement_id=requirement.requirement_id,
+                prompt=f"请提供你的{'或'.join(labels)}。",
+                expected_evidence_keys=[need.key for need in group_needs],
+                control_type=("number" if len(fields) == 1 else "number_group"),
+                fields=fields,
+            )
+            normalized = normalize_question_schema_safely(
+                question,
+                [need.key for need in group_needs],
+                needs_by_key,
+                reusable_by_key,
+            )
+            if normalized.schema_status != "valid":
+                raise RuntimeError(
+                    "Backend Academic Question Policy produced an invalid numeric schema"
+                )
+            questions.append(normalized)
+    return questions, covered_keys
+
+
+LANGUAGE_POLICY_PROOFS: Dict[str, tuple[LanguageProofKind, str]] = {
+    "ielts": ("scored_test", "IELTS"),
+    "toefl": ("scored_test", "TOEFL"),
+    "education.language_medium": ("medium_of_instruction", "英语授课证明"),
+}
+
+
+def backend_language_proof(need: GapEvidenceNeed) -> Optional[tuple[LanguageProofKind, str]]:
+    canonical_key = canonical_evidence_key(need.key)
+    configured = LANGUAGE_POLICY_PROOFS.get(canonical_key)
+    if configured is None or need.proof_kind != configured[0]:
+        return None
+    return configured
+
+
+def evidence_is_complete_known(
+    need: GapEvidenceNeed,
+    item: Optional[UserEvidence],
+) -> bool:
+    return bool(
+        item
+        and item.availability == "known"
+        and not missing_evidence_fields(need, item.value)
+    )
+
+
+def build_backend_language_questions(
+    planned: List[GapPlannedRequirement],
+    reusable_by_key: Dict[str, UserEvidence],
+) -> tuple[List[GapPlannerQuestion], Set[str]]:
+    questions: List[GapPlannerQuestion] = []
+    covered_keys: Set[str] = set()
+    for requirement in planned:
+        language_needs = [
+            need
+            for need in requirement.evidence_needs
+            if need.evidence_type == "language_score"
+            or need.proof_kind is not None
+        ]
+        if not language_needs:
+            continue
+        supported = [
+            need for need in language_needs if backend_language_proof(need) is not None
+        ]
+        if not supported:
+            continue
+
+        relation = requirement.constraint.relation
+        if relation == "any" and len(supported) != len(language_needs):
+            # Keep a partially understood alternative group under one producer.
+            continue
+
+        needs_by_key = {need.key: need for need in requirement.evidence_needs}
+        policy_groups = [supported] if relation == "any" else [[need] for need in supported]
+        for index, group_needs in enumerate(policy_groups):
+            covered_keys.update(need.key for need in group_needs)
+            existing_by_key = {
+                need.key: reusable_by_key.get(canonical_evidence_key(need.key))
+                for need in group_needs
+            }
+            if relation == "any" and any(
+                evidence_is_complete_known(need, existing_by_key[need.key])
+                for need in group_needs
+            ):
+                continue
+
+            partial_known = [
+                need
+                for need in group_needs
+                if (item := existing_by_key[need.key]) is not None
+                and item.availability == "known"
+                and not evidence_is_complete_known(need, item)
+            ]
+            if relation == "any" and partial_known:
+                active_needs = partial_known
+            else:
+                active_needs = [
+                    need
+                    for need in group_needs
+                    if not evidence_is_complete_known(
+                        need, existing_by_key[need.key]
+                    )
+                    and (
+                        (item := existing_by_key[need.key]) is None
+                        or item.availability not in {"known_negative", "unknown"}
+                    )
+                ]
+            if not active_needs:
+                continue
+
+            options = []
+            for need in active_needs:
+                proof_kind, label = backend_language_proof(need) or (None, "")
+                options.append(
+                    GapQuestionOption(
+                        value=canonical_evidence_key(need.key),
+                        label=label,
+                        evidence_key=need.key,
+                        evidence_value=(
+                            {"description": label}
+                            if proof_kind == "medium_of_instruction"
+                            else None
+                        ),
+                    )
+                )
+            prompt = (
+                "你准备使用哪种语言能力证明？"
+                if len(active_needs) > 1
+                else f"请确认你将使用{options[0].label}作为语言能力证明。"
+            )
+            if requirement.requirement_verification_status == "model_memory_unverified":
+                prompt = f"根据目前的 AI 参考信息，该项目可能有相关要求。{prompt}"
+            question = GapPlannerQuestion(
+                question_id=f"policy:{requirement.requirement_id}:language-proof:{index}",
+                requirement_id=requirement.requirement_id,
+                prompt=prompt,
+                expected_evidence_keys=[need.key for need in active_needs],
+                group_relation=relation,
+                control_type="single_select",
+                options=options,
+                fields=[],
+                allow_other=False,
+            )
+            normalized = normalize_question_schema_safely(
+                question,
+                [need.key for need in active_needs],
+                needs_by_key,
+                reusable_by_key,
+            )
+            if normalized.schema_status != "valid":
+                raise RuntimeError(
+                    "Backend Language Question Policy produced an invalid selector schema"
+                )
+            questions.append(normalized)
+    return questions, covered_keys
+
+
+def build_backend_course_questions(
+    planned: List[GapPlannedRequirement],
+    reusable_by_key: Dict[str, UserEvidence],
+) -> tuple[List[GapPlannerQuestion], Set[str]]:
+    questions: List[GapPlannerQuestion] = []
+    covered_keys: Set[str] = set()
+    for requirement in planned:
+        if requirement.category != "course":
+            continue
+        needs_by_key = {need.key: need for need in requirement.evidence_needs}
+        item_needs = [
+            needs_by_key.get(course_requirement_evidence_key(item.item_id))
+            for item in requirement.course_requirements
+        ]
+        item_needs = [need for need in item_needs if need is not None]
+        total_credit_keys = {
+            canonical_evidence_key(option.key)
+            for option in requirement.constraint.options
+            if (option.kind or requirement.constraint.kind) == "course_credit"
+            and option.required_quantity is not None
+            and option.unit
+        }
+        total_credit_needs = [
+            need
+            for need in requirement.evidence_needs
+            if need.key in total_credit_keys
+        ]
+        item_credit_needs = [
+            needs_by_key.get(course_requirement_credit_evidence_key(item.item_id))
+            for item in requirement.course_requirements
+            if item.minimum_credits is not None and item.unit
+        ]
+        item_credit_needs = [need for need in item_credit_needs if need is not None]
+        if not item_needs and not total_credit_needs and not item_credit_needs:
+            continue
+
+        covered_keys.update(need.key for need in item_needs)
+        covered_keys.update(need.key for need in total_credit_needs)
+        covered_keys.update(need.key for need in item_credit_needs)
+        covered_keys.update(item.evidence_key for item in requirement.course_requirements)
+
+        missing_items = [
+            need
+            for need in item_needs
+            if not need.already_known
+            and not (
+                (existing := reusable_by_key.get(need.key))
+                and evidence_is_terminal_for_need(need, existing)
+            )
+        ]
+        if missing_items:
+            checklist = GapPlannerQuestion(
+                question_id=f"policy:{requirement.requirement_id}:course-checklist",
+                requirement_id=requirement.requirement_id,
+                prompt="请确认你是否修过能够覆盖以下要求的课程。",
+                expected_evidence_keys=[need.key for need in missing_items],
+                control_type="boolean_group",
+                fields=[
+                    GapQuestionField(
+                        field_id=need.key.rsplit(".", 1)[-1],
+                        label=need.label,
+                        evidence_key=need.key,
+                        value_path="completed",
+                    )
+                    for need in missing_items
+                ],
+                allow_unknown=False,
+                allow_negative=False,
+                allow_other=False,
+            )
+            normalized = normalize_question_schema_safely(
+                checklist,
+                [need.key for need in missing_items],
+                needs_by_key,
+                reusable_by_key,
+            )
+            if normalized.schema_status != "valid":
+                raise RuntimeError(
+                    "Backend Course Question Policy produced an invalid checklist schema"
+                )
+            questions.append(normalized)
+
+        credit_needs = [
+            need
+            for need in [*total_credit_needs, *item_credit_needs]
+            if not need.already_known
+            and not (
+                (existing := reusable_by_key.get(need.key))
+                and evidence_is_terminal_for_need(need, existing)
+            )
+        ]
+        for index, need in enumerate(credit_needs):
+            unit = need.unit or "credits"
+            prompt = f"{need.label or '这些相关课程'}合计多少 {unit}？"
+            credit_question = GapPlannerQuestion(
+                question_id=f"policy:{requirement.requirement_id}:course-credit:{index}",
+                requirement_id=requirement.requirement_id,
+                prompt=prompt,
+                expected_evidence_keys=[need.key],
+                control_type="number",
+                fields=[
+                    GapQuestionField(
+                        field_id=f"{need.key.rsplit('.', 1)[-1]}-quantity",
+                        label=f"{need.label or '相关课程'}（{unit}）",
+                        evidence_key=need.key,
+                        value_path="quantity",
+                    )
+                ],
+                validation=GapQuestionValidation(required=True, minimum=0),
+                allow_unknown=True,
+                allow_negative=False,
+                allow_other=False,
+            )
+            normalized = normalize_question_schema_safely(
+                credit_question,
+                [need.key],
+                needs_by_key,
+                reusable_by_key,
+            )
+            if normalized.schema_status != "valid":
+                raise RuntimeError(
+                    "Backend Course Question Policy produced an invalid credit schema"
+                )
+            questions.append(normalized)
+    return questions, covered_keys
+
+
+GRE_POLICY_FIELDS: tuple[tuple[GREScoreComponent, str], ...] = (
+    ("verbal", "Verbal Reasoning"),
+    ("quantitative", "Quantitative Reasoning"),
+    ("analytical_writing", "Analytical Writing"),
+)
+
+
+def build_backend_gre_questions(
+    planned: List[GapPlannedRequirement],
+    reusable_by_key: Dict[str, UserEvidence],
+) -> tuple[List[GapPlannerQuestion], Set[str]]:
+    questions: List[GapPlannerQuestion] = []
+    covered_keys: Set[str] = set()
+    for requirement in planned:
+        gre_need = next(
+            (
+                need
+                for need in requirement.evidence_needs
+                if need.evidence_type == "standardized_score"
+                and canonical_evidence_key(need.key) == "gre"
+            ),
+            None,
+        )
+        if gre_need is None:
+            continue
+        covered_keys.add(gre_need.key)
+        if gre_need.group_relation == "any" and any(
+            evidence_is_complete_known(
+                sibling,
+                reusable_by_key.get(canonical_evidence_key(sibling.key)),
+            )
+            for sibling in requirement.evidence_needs
+            if sibling.evidence_group == gre_need.evidence_group
+        ):
+            continue
+        existing = reusable_by_key.get(gre_need.key)
+        missing_fields = (
+            missing_evidence_fields(gre_need, existing.value)
+            if existing and existing.availability == "known"
+            else list(gre_need.required_fields)
+        )
+        if not missing_fields or (
+            existing and existing.availability in {"known_negative", "unknown"}
+        ):
+            continue
+
+        labels = dict(GRE_POLICY_FIELDS)
+        threshold_by_component = {
+            option.component: option.minimum
+            for option in requirement.constraint.options
+            if canonical_evidence_key(option.key) == "gre"
+            and option.component is not None
+            and option.minimum is not None
+        }
+        fields = [
+            GapQuestionField(
+                field_id=f"gre-{component}",
+                label=(
+                    f"{labels[component]}（项目要求 ≥ {threshold_by_component[component]:g}）"
+                    if component in threshold_by_component
+                    else labels[component]
+                ),
+                evidence_key=gre_need.key,
+                value_path=component,
+            )
+            for component in (item[0] for item in GRE_POLICY_FIELDS)
+            if component in missing_fields
+        ]
+        question = GapPlannerQuestion(
+            question_id=f"policy:{requirement.requirement_id}:gre-score",
+            requirement_id=requirement.requirement_id,
+            prompt="请填写你的 GRE 成绩。",
+            expected_evidence_keys=[gre_need.key],
+            control_type="number" if len(fields) == 1 else "number_group",
+            fields=fields,
+            validation=GapQuestionValidation(required=True, minimum=0),
+            allow_other=False,
+        )
+        normalized = normalize_question_schema_safely(
+            question,
+            [gre_need.key],
+            {gre_need.key: gre_need},
+            reusable_by_key,
+        )
+        if normalized.schema_status != "valid":
+            raise RuntimeError(
+                "Backend GRE Question Policy produced an invalid score schema"
+            )
+        questions.append(normalized)
+    return questions, covered_keys
+
+
+EXPERIENCE_POLICY_OPTIONS: tuple[tuple[str, str, Optional[ExperienceType]], ...] = (
+    ("experience:work", "工作经历", "work"),
+    ("experience:internship", "实习经历", "internship"),
+    ("experience:research", "研究经历", "research"),
+    ("experience:project", "项目经历", "project"),
+    ("experience:other", "其他", "other"),
+    ("experience:none", "没有相关经历", None),
+)
+
+
+def build_backend_experience_questions(
+    planned: List[GapPlannedRequirement],
+    reusable_by_key: Dict[str, UserEvidence],
+) -> tuple[List[GapPlannerQuestion], Set[str]]:
+    questions: List[GapPlannerQuestion] = []
+    covered_keys: Set[str] = set()
+    for requirement in planned:
+        experience_need = next(
+            (
+                need
+                for need in requirement.evidence_needs
+                if need.evidence_type == "experience"
+                and canonical_evidence_key(need.key) == "experience"
+            ),
+            None,
+        )
+        if experience_need is None:
+            continue
+        covered_keys.add(experience_need.key)
+        existing = reusable_by_key.get("experience")
+        if existing and existing.availability in {"known_negative", "unknown"}:
+            continue
+        missing_fields = (
+            missing_evidence_fields(experience_need, existing.value)
+            if existing and existing.availability == "known"
+            else list(experience_need.required_fields)
+        )
+        if not missing_fields:
+            continue
+
+        needs_types = bool(
+            {"has_experience", "experience_types"}.intersection(missing_fields)
+        )
+        needs_duration = bool({"duration", "unit"}.intersection(missing_fields))
+        options = []
+        if needs_types:
+            for value, label, experience_type in EXPERIENCE_POLICY_OPTIONS:
+                options.append(
+                    GapQuestionOption(
+                        value=value,
+                        label=label,
+                        evidence_key="experience",
+                        evidence_value=(
+                            {
+                                "has_experience": False,
+                                "experience_types": [],
+                                "duration": None,
+                                "unit": None,
+                            }
+                            if experience_type is None
+                            else {
+                                "has_experience": True,
+                                "experience_types": [experience_type],
+                            }
+                        ),
+                    )
+                )
+        if needs_duration:
+            options.extend(
+                [
+                    GapQuestionOption(
+                        value=f"unit:{unit}",
+                        label=label,
+                        evidence_key="experience",
+                        evidence_value={"unit": unit},
+                    )
+                    for unit, label in (("months", "个月"), ("years", "年"))
+                ]
+            )
+        fields = (
+            [
+                GapQuestionField(
+                    field_id="experience-duration",
+                    label="累计时长",
+                    evidence_key="experience",
+                    value_path="duration",
+                )
+            ]
+            if needs_duration
+            else []
+        )
+        question = GapPlannerQuestion(
+            question_id=f"policy:{requirement.requirement_id}:experience-form",
+            requirement_id=requirement.requirement_id,
+            prompt="请提供与你申请方向相关的经验类型和累计时长。",
+            expected_evidence_keys=["experience"],
+            control_type="experience_form",
+            options=options,
+            fields=fields,
+            allow_unknown=False,
+            allow_negative=False,
+            allow_other=False,
+        )
+        normalized = normalize_question_schema_safely(
+            question,
+            ["experience"],
+            {"experience": experience_need},
+            reusable_by_key,
+        )
+        if normalized.schema_status != "valid":
+            raise RuntimeError(
+                "Backend Experience Question Policy produced an invalid form schema"
+            )
+        questions.append(normalized)
+    return questions, covered_keys
+
+
+def build_backend_material_questions(
+    planned: List[GapPlannedRequirement],
+    reusable_by_key: Dict[str, UserEvidence],
+) -> tuple[List[GapPlannerQuestion], Set[str]]:
+    questions: List[GapPlannerQuestion] = []
+    covered_keys: Set[str] = set()
+    for requirement in planned:
+        if requirement.category != "materials":
+            continue
+        needs_by_key = {need.key: need for need in requirement.evidence_needs}
+        checklist_needs = [
+            need
+            for need in requirement.evidence_needs
+            if need.evidence_type == "material_status"
+            and need.material_type is not None
+            and need.material_type != "recommendation_letters"
+            and need.item_id
+        ]
+        recommendation_needs = [
+            need
+            for need in requirement.evidence_needs
+            if need.evidence_type == "material_quantity"
+            and need.material_type == "recommendation_letters"
+            and need.item_id
+        ]
+        supported = [*checklist_needs, *recommendation_needs]
+        if not supported:
+            continue
+        covered_keys.update(need.key for need in supported)
+
+        missing_checklist = [
+            need
+            for need in checklist_needs
+            if not (
+                (existing := reusable_by_key.get(need.key))
+                and existing.availability in {"known", "known_negative", "unknown"}
+            )
+        ]
+        if missing_checklist:
+            question = GapPlannerQuestion(
+                question_id=f"policy:{requirement.requirement_id}:materials-checklist",
+                requirement_id=requirement.requirement_id,
+                prompt="请确认你目前是否已经有以下可用于申请的材料。",
+                expected_evidence_keys=[need.key for need in missing_checklist],
+                control_type="boolean_group",
+                fields=[
+                    GapQuestionField(
+                        field_id=need.item_id or need.key,
+                        label=need.label,
+                        evidence_key=need.key,
+                        value_path="status",
+                    )
+                    for need in missing_checklist
+                ],
+                allow_unknown=False,
+                allow_negative=False,
+                allow_other=False,
+            )
+            normalized = normalize_question_schema_safely(
+                question,
+                [need.key for need in missing_checklist],
+                needs_by_key,
+                reusable_by_key,
+            )
+            if normalized.schema_status != "valid":
+                raise RuntimeError(
+                    "Backend Materials Question Policy produced an invalid checklist schema"
+                )
+            questions.append(normalized)
+
+        for index, need in enumerate(recommendation_needs):
+            existing = reusable_by_key.get(need.key)
+            if existing and existing.availability in {
+                "known",
+                "known_negative",
+                "unknown",
+            }:
+                continue
+            threshold = need.required_quantity
+            label = (
+                f"已确认的推荐人数（项目要求 {threshold:g} 位）"
+                if threshold is not None
+                else "已确认的推荐人数"
+            )
+            question = GapPlannerQuestion(
+                question_id=(
+                    f"policy:{requirement.requirement_id}:recommendation-count:{index}"
+                ),
+                requirement_id=requirement.requirement_id,
+                prompt="目前已经确认愿意为你提供推荐信的推荐人有几位？",
+                expected_evidence_keys=[need.key],
+                control_type="number",
+                fields=[
+                    GapQuestionField(
+                        field_id=f"{need.item_id}-quantity",
+                        label=label,
+                        evidence_key=need.key,
+                        value_path="quantity",
+                    )
+                ],
+                validation=GapQuestionValidation(required=True, minimum=0),
+                allow_unknown=False,
+                allow_negative=False,
+                allow_other=False,
+            )
+            normalized = normalize_question_schema_safely(
+                question,
+                [need.key],
+                needs_by_key,
+                reusable_by_key,
+            )
+            if normalized.schema_status != "valid":
+                raise RuntimeError(
+                    "Backend Materials Question Policy produced an invalid recommendation schema"
+                )
+            questions.append(normalized)
+    return questions, covered_keys
+
+
+def build_backend_conditional_controller_questions(
+    planned: List[GapPlannedRequirement],
+    reusable_by_key: Dict[str, UserEvidence],
+    already_covered_keys: Set[str],
+) -> tuple[List[GapPlannerQuestion], Set[str]]:
+    questions: List[GapPlannerQuestion] = []
+    covered_keys: Set[str] = set()
+    for requirement in planned:
+        if requirement.conditional_state != "pending":
+            continue
+        needs_by_key = {need.key: need for need in requirement.evidence_needs}
+        controlling_keys = {
+            canonical_evidence_key(key)
+            for key in requirement.conditional.controlling_evidence_keys
+        }
+        predicates_by_key: Dict[str, List[GapConditionalPredicate]] = {}
+        for predicate in requirement.conditional.predicates:
+            predicates_by_key.setdefault(
+                canonical_evidence_key(predicate.evidence_key), []
+            ).append(predicate)
+        for other_item in requirement.other_items:
+            need = needs_by_key.get(other_item.evidence_key)
+            if (
+                need is None
+                or need.key not in controlling_keys
+                or need.key in already_covered_keys
+            ):
+                continue
+            controller_predicates = predicates_by_key.get(need.key, [])
+            if other_item.value_kind not in {
+                "boolean", "single_select", "multi_select"
+            }:
+                logger.warning(
+                    "conditional_controller_unsupported_other_kind requirement_id=%s key=%s kind=%s skipped=true",
+                    requirement.requirement_id,
+                    need.key,
+                    other_item.value_kind,
+                )
+                continue
+            if other_item.value_kind == "boolean" and not (
+                len(controller_predicates) == 1
+                and controller_predicates[0].operator == "equals"
+                and len(controller_predicates[0].expected_values) == 1
+            ):
+                logger.warning(
+                    "conditional_controller_boolean_predicate_unsupported requirement_id=%s key=%s skipped=true",
+                    requirement.requirement_id,
+                    need.key,
+                )
+                continue
+            covered_keys.add(need.key)
+            existing = reusable_by_key.get(need.key)
+            if existing and evidence_is_terminal_for_need(need, existing):
+                continue
+            options = [
+                GapQuestionOption(
+                    value=option,
+                    label=option,
+                    evidence_key=need.key,
+                    evidence_value={"description": option},
+                )
+                for option in other_item.options
+            ]
+            fields = (
+                [
+                    GapQuestionField(
+                        field_id=other_item.item_id,
+                        label=other_item.label,
+                        evidence_key=need.key,
+                        value_path="status",
+                    )
+                ]
+                if other_item.value_kind == "boolean"
+                else []
+            )
+            control_type = (
+                "boolean"
+                if other_item.value_kind == "boolean"
+                else other_item.value_kind
+            )
+            prompt = (
+                f"请确认：{other_item.label}。"
+                if other_item.value_kind == "boolean"
+                else f"请选择你的{other_item.label}。"
+            )
+            question = GapPlannerQuestion(
+                question_id=(
+                    f"policy:{requirement.requirement_id}:conditional-controller:"
+                    f"{other_item.item_id}"
+                ),
+                requirement_id=requirement.requirement_id,
+                prompt=prompt,
+                expected_evidence_keys=[need.key],
+                control_type=control_type,
+                options=options,
+                fields=fields,
+                validation=GapQuestionValidation(
+                    required=True,
+                    min_selections=(1 if options else None),
+                    max_selections=(1 if control_type == "single_select" else None),
+                ),
+                allow_unknown=True,
+                allow_negative=True,
+                allow_other=False,
+                conditional_controller_bindings=[
+                    GapConditionalControllerBinding(
+                        evidence_key=need.key,
+                        operator=predicate.operator,
+                        expected_values=list(predicate.expected_values),
+                    )
+                    for predicate in controller_predicates
+                ],
+            )
+            normalized = normalize_question_schema_safely(
+                question,
+                [need.key],
+                needs_by_key,
+                reusable_by_key,
+            )
+            if normalized.schema_status != "valid":
+                raise RuntimeError(
+                    "Backend Conditional Controller Policy produced an invalid schema"
+                )
+            questions.append(normalized)
+    return questions, covered_keys
+
+
+def build_backend_other_questions(
+    planned: List[GapPlannedRequirement],
+    reusable_by_key: Dict[str, UserEvidence],
+) -> tuple[List[GapPlannerQuestion], Set[str]]:
+    questions: List[GapPlannerQuestion] = []
+    covered_keys: Set[str] = set()
+    for requirement in planned:
+        if not requirement.other_items:
+            continue
+        needs_by_key = {need.key: need for need in requirement.evidence_needs}
+        for other_item in requirement.other_items:
+            need = needs_by_key.get(other_item.evidence_key)
+            if need is None:
+                continue
+            covered_keys.add(need.key)
+            existing = reusable_by_key.get(need.key)
+            if existing and existing.availability == "known" and not missing_evidence_fields(
+                need, existing.value
+            ):
+                continue
+            control_type = {
+                "boolean": "boolean",
+                "numeric": "number",
+                "single_select": "single_select",
+                "multi_select": "multi_select",
+                "short_text": "short_text",
+            }[other_item.value_kind]
+            options = []
+            fields = []
+            if other_item.value_kind in {"single_select", "multi_select"}:
+                options = [
+                    GapQuestionOption(
+                        value=option,
+                        label=option,
+                        evidence_key=need.key,
+                        evidence_value={"description": option},
+                    )
+                    for option in other_item.options
+                ]
+            else:
+                fields = [
+                    GapQuestionField(
+                        field_id=other_item.item_id,
+                        label=other_item.label,
+                        evidence_key=need.key,
+                        value_path=(
+                            "status"
+                            if other_item.value_kind == "boolean"
+                            else "quantity"
+                            if other_item.value_kind == "numeric"
+                            else "description"
+                        ),
+                    )
+                ]
+            prompt = {
+                "boolean": f"你目前是否已经有或已完成{other_item.label}？",
+                "numeric": f"请提供{other_item.label}的实际数值。",
+                "single_select": f"请选择你的{other_item.label}。",
+                "multi_select": f"请选择所有适用的{other_item.label}。",
+                "short_text": f"请填写{other_item.label}。",
+            }[other_item.value_kind]
+            question = GapPlannerQuestion(
+                question_id=f"policy:{requirement.requirement_id}:other:{other_item.item_id}",
+                requirement_id=requirement.requirement_id,
+                prompt=prompt,
+                expected_evidence_keys=[need.key],
+                control_type=control_type,
+                options=options,
+                fields=fields,
+                validation=GapQuestionValidation(
+                    required=True,
+                    minimum=(0 if other_item.value_kind == "numeric" else None),
+                    min_selections=(
+                        1
+                        if other_item.value_kind in {"single_select", "multi_select"}
+                        else None
+                    ),
+                    max_selections=(
+                        1 if other_item.value_kind == "single_select" else None
+                    ),
+                ),
+                allow_unknown=False,
+                allow_negative=False,
+                allow_other=False,
+            )
+            normalized = normalize_question_schema_safely(
+                question,
+                [need.key],
+                needs_by_key,
+                reusable_by_key,
+            )
+            if normalized.schema_status != "valid":
+                raise RuntimeError(
+                    "Backend Other Question Policy produced an invalid schema"
+                )
+            questions.append(normalized)
+    return questions, covered_keys
+
+
+async def repair_gap_questions_once(
+    questions: List[GapPlannerQuestion],
+    requirements_by_id: Dict[str, GapPlannedRequirement],
+    reusable_by_key: Dict[str, UserEvidence],
+) -> tuple[List[GapPlannerQuestion], int]:
+    invalid_questions = [
+        question
+        for question in questions
+        if question.schema_status != "valid"
+    ]
+    if not invalid_questions:
+        return questions, 0
+    contexts = [
+        gap_question_repair_context(
+            question,
+            requirements_by_id[question.requirement_id],
+            reusable_by_key,
+        )
+        for question in invalid_questions
+        if question.requirement_id in requirements_by_id
+    ]
+    if not contexts:
+        return [
+            gap_question_generation_error(
+                question_with_repair_failure(
+                    question,
+                    "ownership_failed",
+                    "repair_requirement_ownership_missing",
+                ),
+                final_failure_stage="ownership_failed",
+            )
+            if question in invalid_questions
+            else question
+            for question in questions
+        ], 0
+    prompt = (
+        "你是 Structured Adaptive Interview Question Schema Repair。不要联网，不重新规划 Gap，"
+        "只修复输入中的 invalid question schemas。每个 question 必须保持原 requirement_id、"
+        "question_id、allowed evidence keys 和 evidence group；不得添加新 evidence key。"
+        "control_type 只能使用 boolean、single_select、multi_select、number、number_group、date，"
+        "禁止 text_fallback。ALL 的每个 missing slot 都必须有输入路径；ANY 至少提供一个完整"
+        "合法 branch。语言证明 ANY group 的第一问必须修复成 selector-only single_select，"
+        "每个 proof branch 一个 option 且 fields=[]；不得同时采集考试成绩。"
+        "只输出修复后的 questions JSON。\n\n"
+        f"Repair Contexts：{json.dumps(contexts, ensure_ascii=False)}\n"
+        f"输出 JSON Schema：{json.dumps(GapQuestionRepairOutput.model_json_schema(), ensure_ascii=False)}\n"
+        "只输出 JSON，不要解释。"
+    )
+    try:
+        content = await call_deepseek(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "只输出完整合法的 Question Schema JSON，不使用任何工具。",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=3500,
+            response_format={"type": "json_object"},
+        )
+    except HTTPException as error:
+        logger.warning(
+            "gap_question_schema_repair_failed stage=repair_generation_failed error_type=%s question_count=%d",
+            type(error).__name__,
+            len(invalid_questions),
+        )
+        return [
+            gap_question_generation_error(
+                question_with_repair_failure(
+                    question,
+                    "repair_generation_failed",
+                    type(error).__name__,
+                ),
+                final_failure_stage="repair_generation_failed",
+            )
+            if question in invalid_questions
+            else question
+            for question in questions
+        ], 1
+    try:
+        repaired_output = GapQuestionRepairOutput.model_validate_json(content)
+    except ValidationError as error:
+        parsed_schema: Optional[Dict[str, Any]] = None
+        try:
+            candidate_json = json.loads(content)
+            if isinstance(candidate_json, dict):
+                parsed_schema = candidate_json
+        except (TypeError, ValueError):
+            pass
+        logger.warning(
+            "gap_question_schema_repair_failed stage=repair_schema_invalid error_type=%s question_count=%d",
+            type(error).__name__,
+            len(invalid_questions),
+        )
+        return [
+            gap_question_generation_error(
+                question_with_repair_failure(
+                    question,
+                    "repair_schema_invalid",
+                    "repair_output_schema_validation_failed",
+                    repair_schema=parsed_schema,
+                ),
+                final_failure_stage="repair_schema_invalid",
+            )
+            if question in invalid_questions
+            else question
+            for question in questions
+        ], 1
+
+    repaired_by_id = {
+        question.question_id: question for question in repaired_output.questions
+    }
+    result = []
+    for question in questions:
+        if question not in invalid_questions:
+            result.append(question)
+            continue
+        draft = repaired_by_id.get(question.question_id)
+        requirement = requirements_by_id.get(question.requirement_id or "")
+        if draft is None:
+            result.append(
+                gap_question_generation_error(
+                    question_with_repair_failure(
+                        question,
+                        "repair_schema_missing",
+                        "repair_question_id_missing",
+                    ),
+                    final_failure_stage="repair_schema_missing",
+                )
+            )
+            continue
+        if requirement is None:
+            result.append(
+                gap_question_generation_error(
+                    question_with_repair_failure(
+                        question,
+                        "ownership_failed",
+                        "repair_requirement_ownership_missing",
+                        repair_schema=draft.model_dump(mode="json"),
+                    ),
+                    final_failure_stage="ownership_failed",
+                )
+            )
+            continue
+        needs_by_key = {need.key: need for need in requirement.evidence_needs}
+        allowed_keys = [
+            key for key in question.allowed_evidence_keys if key in needs_by_key
+        ]
+        repair_diagnostics = (
+            question.generation_diagnostics or GapQuestionGenerationDiagnostics()
+        ).model_copy(
+            update={"repair_schema": draft.model_dump(mode="json")}
+        )
+        candidate = normalize_question_schema_safely(
+            GapPlannerQuestion(**draft.model_dump()).model_copy(
+                update={
+                    "question_id": question.question_id,
+                    "requirement_id": question.requirement_id,
+                    "generation_diagnostics": repair_diagnostics,
+                }
+            ),
+            allowed_keys,
+            needs_by_key,
+            reusable_by_key,
+            repair_phase=True,
+        )
+        if candidate.schema_status != "valid":
+            final_stage = (
+                candidate.generation_diagnostics.repair_failure_stage
+                if candidate.generation_diagnostics
+                and candidate.generation_diagnostics.repair_failure_stage
+                else "repair_schema_invalid"
+            )
+            result.append(
+                gap_question_generation_error(
+                    candidate,
+                    final_failure_stage=final_stage,
+                    repair_validator_error=candidate.schema_error_code,
+                )
+            )
+            continue
+        result.append(candidate.model_copy(update={"repair_attempts": 1}))
+    return result, 1
+
+
 async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
-    formal_requirements = formal_gap_requirements(request.requirements_review)
+    all_formal_requirements = formal_gap_requirements(request.requirements_review)
+    formal_requirements = [
+        item
+        for item in all_formal_requirements
+        if item.get("route_scope", "standard") == "standard"
+    ]
+    excluded_requirements = [
+        GapPlannedRequirement(
+            requirement_id=item["requirement_id"],
+            matchable=False,
+            user_matchable=False,
+            informational_reason=item.get("excluded_reason") or "",
+            category=item["category"],
+            requirement=item["requirement"],
+            requirement_zh=item.get("requirement_zh"),
+            importance=item["importance"],
+            requirement_verification_status=item[
+                "requirement_verification_status"
+            ],
+            source_url=item.get("source_url"),
+            source_cycle=item.get("source_cycle"),
+            temporal_applicability=item["temporal_applicability"],
+            temporal_note=item.get("temporal_note"),
+            parent_requirement_id=item.get("parent_requirement_id"),
+            parent_requirement_text=item.get("parent_requirement_text"),
+            parent_has_explicit_conditional_scope=item.get(
+                "parent_has_explicit_conditional_scope", False
+            ),
+            route_scope="special_internal",
+            excluded_reason="unsupported_special_internal_route",
+            route_scope_source=item.get(
+                "route_scope_source", "current_requirement"
+            ),
+        )
+        for item in all_formal_requirements
+        if item.get("route_scope") == "special_internal"
+    ]
     reusable = merge_reusable_evidence(request.user_profile, request.user_evidence)
     if not formal_requirements:
         return GapPlan(
             target_program=request.target_program,
+            requirements=excluded_requirements,
             reusable_evidence=reusable,
             planning_llm_requests=0,
         )
 
-    evidence_summary = [item.model_dump() for item in reusable]
-    output_schema = GapPlannerOutput.model_json_schema()
+    planner_payload = gap_planner_prompt_payload(
+        request,
+        formal_requirements,
+        reusable,
+    )
+    output_schema = GapPlannerLLMOutput.model_json_schema()
     prompt = (
         "你是留学申请 Gap Evidence Planner。只根据给定的有效 Requirement 和用户已有证据，"
         "规划一次自适应访谈。不要联网，不得补充、改写或猜测学校要求。\n\n"
@@ -2298,15 +6348,30 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
         "match_strategy：明确数值、boolean、数量用 deterministic；专业/课程等价、相关性、"
         "模糊背景用 semantic；相关性加年限/学分等数值用 hybrid。\n"
         "Evidence key 尽量使用可跨项目复用的规范 key：education.university、education.major、"
-        "gpa、average_score、ielts、toefl、gre、gmat、courses、experience、"
+        "degree_classification、gpa、average_score、ielts、toefl、gre、gmat、courses、experience、"
         "materials.portfolio、materials.cv、materials.transcript、materials.degree_certificate、"
         "materials.recommendations。不要把项目名写入 evidence key。\n"
         "evidence_type 只能从 education_university、education_major、academic_score、"
         "language_score、standardized_score、courses、material_status、material_quantity、"
         "experience、generic 中选择，不得输出其他值。\n"
+        "每个 evidence_need 必须输出 value_kind，且只能是 categorical、numeric、boolean、text、"
+        "date。value_kind 描述 Evidence 数据语义，不是 UI control_type：degree_classification 固定为"
+        "categorical，GPA / average_score 固定为 numeric，材料 availability 固定为 boolean。"
+        "不得因为 Requirement 文案改变 canonical datatype，也不得在 value_kind 中输出任何 UI 控件信息。\n"
+        "对于 language Requirement 的每个 accepted proof evidence，按原文输出可选 proof_kind："
+        "IELTS、TOEFL 等标准化计分考试用 scored_test；English-medium / Medium of Instruction 用"
+        "medium_of_instruction；只有原文明示接受特定非考试语言证书或豁免路径时，才分别使用"
+        "certificate 或 waiver。不得根据常识新增学校未接受的证明。proof_kind 只描述证明性质，"
+        "不得包含 score fields、UI、control_type 或 question text；minimum 和 component threshold"
+        "继续放在 constraint 中。\n"
         "constraint.kind 仅允许 score、material_boolean、material_quantity、"
-        "experience_duration、course_credit、none。IELTS/TOEFL OR 关系放在同一个 constraint.options；"
-        "constraint.relation：所有选项都要满足用 all，任一考试路径满足即可用 any。"
+        "experience_duration、course_credit、none。任何 A OR B 替代证据路径都放在同一个"
+        "constraint.options（例如 IELTS/TOEFL 或 degree classification/GPA）；"
+        "constraint.relation：所有选项都要满足用 all，任一证据路径满足即可用 any。"
+        "对于 GRE，evidence key 固定使用 gre；如果原文明示 Verbal、Quantitative 或 "
+        "Analytical Writing 的分项门槛，在对应 score option.component 中分别使用 verbal、"
+        "quantitative、analytical_writing，并把门槛放在 minimum。不得创建 GRE total score，"
+        "不得自动求和或换算。"
         "同一条 Requirement 同时含材料是否具备和数量时，在每个 option.kind 分别填写"
         "material_boolean 或 material_quantity，外层 kind 可用 none。"
         "GPA 与 average_score 必须分别使用自己的 key，禁止换算。"
@@ -2315,31 +6380,188 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
         "不能追问或判断具体数量。B2 也不能自行创造 IELTS/TOEFL 分数等价关系。"
         "原文未给阈值时保持 null。"
         "推荐信数量、材料是否准备、考试阈值由代码计算，不能让后续 LLM 做算术。\n"
+        "每条 Requirement 还必须输出 course_requirements。只有原文明示 mandatory / required / must"
+        "修读的具体课程或知识项才逐门输出 evidence_key、course_name，可选 group_label 只保存原文"
+        "明确的 domain heading，以及原文明示时才填写的 minimum_credits 和 unit。如果 mandatory"
+        " Requirement 先列出领域，再在括号中穷举该领域所需的具体 introductory topics（例如"
+        "Domain (item A, item B, item C)），括号内每个 item 都是独立 required course_requirement，"
+        "不是 domain alternatives；必须保留全部 item，外层 relation 使用 all，不得压缩为"
+        "courses.domain generic evidence、multi_select 或 min_selections=1。仅当原文使用 examples、"
+        "such as、including but not limited to、recommended 等非穷举/非强制措辞时，括号或列表项"
+        "课程不得自动变成 required，也不得自行补 prerequisite。具体 required courses 与总学分"
+        "threshold 是两个独立事实：总量继续放在 course_credit constraint；如果只写某领域共"
+        "22.5 ECTS 而没有明确课程清单，course_requirements 必须是空数组。"
+        "course_requirements 不得包含 UI、checklist 或 question text。\n"
+        "每条 Requirement 还必须输出 conditional metadata：is_conditional、condition_text、"
+        "controlling_evidence_keys、predicate_relation、predicates。只有原文明示 if selecting、"
+        "applicants from、where applicable、"
+        "only for applicants with 等适用条件时，is_conditional=true，并保留原文中的明确条件描述；"
+        "条件能可靠映射到本 Requirement 已有 canonical evidence 时才填写 controlling keys，否则"
+        "保持空数组。每个 predicate 的 evidence_key 必须逐字引用 controlling_evidence_keys 中的"
+        "合法 key；operator 只能是 equals 或 in；expected_values 必须是非空数组，且值只能来自"
+        "Requirement 原文明示的条件取值。equals 只输出一个 expected value，in 可输出原文明示的"
+        "多个可接受值。多个 predicate 全部成立才适用时 predicate_relation=all，任一成立即可时"
+        "使用 any。不得凭常识补充同义词、缩写或其他取值；无法可靠提取 predicate 时必须输出"
+        "predicates=[]，由 backend 保持 pending。不得根据常识创造条件，也不得把 recommendation / "
+        "preference 自动当作 conditional。只描述条件与 predicate，不判断其当前"
+        "active/inactive/pending 状态，不生成 UI、question 或 control metadata。\n"
+        "Conditional metadata 必须严格限定在当前 requirement_id 和当前 Requirement 原文本身。"
+        "不得因为同一网页段落、同一 source、邻近 Requirement 或同一 pathway section，把某条"
+        "Requirement 的条件传播给另一条普通 Requirement。普通 Requirement 自身没有 pathway /"
+        " applicant 限定时必须 is_conditional=false，即使附近存在 Accelerated 或其他专属路径。"
+        "若 general Requirement 与 pathway-specific Requirement 内容相似，也必须分别保留各自的"
+        "applicability scope，不得合并或复制 conditional metadata。controlling_evidence_keys 必须"
+        "真正用于判断当前 Requirement 是否适用；仅仅提到某所本科院校、学历或年级，不得自动使用"
+        "education.university / education.degree 作为 controller。\n"
+        "Conditional applicability 与 eligibility 必须分开：controller 只回答该 Requirement 是否适用；"
+        "进入适用范围后才判断用户是否满足资格。对于 pathway-specific Requirement，用户是否选择该"
+        "pathway 是 applicability；院校、年级、advisor 等通常是该 pathway 内的 eligibility evidence，"
+        "不得直接替代 pathway selection predicate。若原文明示一个可用 yes/no 表达的 applicability"
+        "事实，可以为同一 Requirement 声明 requirement-scoped generic boolean evidence_need，"
+        "predicate 使用 equals + expected_values=[\"true\"]，并提供 boolean other descriptor。"
+        "这不是新增 canonical key；key 仍必须属于当前 Requirement，且不得从常识创造条件。\n"
+        "如果 Planner Input 明确给出 inherits_parent_applicability=true、parent_requirement_id 和"
+        "parent_requirement_text，当前 Requirement 是由 backend 从该 parent 拆出的 synthetic child；"
+        "此时必须继承 parent 原文明示的 applicability scope，并为 child 保留与 parent 一致的"
+        "structured conditional metadata。只有这种显式 parent-child provenance 允许继承；不得从"
+        "相邻 Requirement、相同 source URL、相似文本或 section 关键词推断继承。\n"
+        "对于无法归入已支持领域的 programme-specific Requirement，可在该 Requirement 的"
+        "other_items 中输出受限 Evidence descriptor。每项只能包含 source_evidence_key、label、"
+        "value_kind、options；source_evidence_key 必须逐字引用同一 Requirement 已声明的"
+        "evidence_need key。value_kind 只能是 boolean、numeric、single_select、multi_select、"
+        "short_text。single_select/multi_select 的 options 只能逐项提取 Requirement 原文明示的"
+        "有限选项；multi_select 仅在原文明示可多选时使用。其他 kind 的 options 必须为空。"
+        "other_items 不得包含 control_type、fields、value_path、validation、UI layout、question text"
+        "或自定义 value shape。成功输出 other_item 后不得再为同一 source evidence 输出 question；"
+        "由 backend 生成控件。Conditional controller 优先只使用 boolean、single_select、multi_select；"
+        "不得为了 controller 发明原文不存在的 selector options，也不得发明 canonical evidence key。"
+        "conditional controller 无法可靠映射时保持 other_items=[]，由 backend 保持 pending，且不得为"
+        "该 controller 输出 legacy question；普通非 controller evidence 无法映射时仍可继续旧 questions 路径；"
+        "不得为了覆盖率创造 descriptor。\n"
         "所有面向用户的 question 必须使用简洁自然的中文。问题应合并相关 Evidence，"
         "例如一次询问所有相关课程，不要逐门课程机械提问。"
         "已有 evidence 的 availability 无论 known、known_negative 还是 unknown，都代表已经回答，"
         "不得重复提问。不允许为 informational Requirement 生成问题。\n\n"
-        f"Target Program：{request.target_program.model_dump_json()}\n"
-        f"正式 Requirements：{json.dumps(formal_requirements, ensure_ascii=False)}\n"
-        f"已有可复用 Evidence：{json.dumps(evidence_summary, ensure_ascii=False)}\n"
+        "每个 question 同时输出可渲染的 UI schema。prompt 是面向用户的问题；"
+        "每个 question 必须填写它所属的 requirement_id，并且只能包含该 Requirement 内定义的"
+        "evidence keys。即使两个 Requirement 的 category 相同，也不得合并成同一 question；"
+        "ANY/ALL 只能作用于同一个 requirement_id 内的 alternatives。"
+        "backend 提供的 evidence_needs 是该 Requirement/evidence group 唯一合法的 canonical key 集。"
+        "expected_evidence_keys、options[].evidence_key 和 fields[].evidence_key 只能逐字引用其中的 key，"
+        "不得创建新的 namespace 或 key；backend 会在返回前覆盖 allowed_evidence_keys 并校验。"
+        "group_relation 使用 any/all；"
+        "control_type 只能是 boolean、single_select、multi_select、number、number_group、date，"
+        "正常主路径禁止 text_fallback。options 和 fields 必须从 Requirement 原文及其 evidence_needs 动态产生，"
+        "不得引入 Requirement 没有的新门槛。field.evidence_key 必须属于 expected_evidence_keys；"
+        "field.value_path 只能使用 schema 枚举。single_select/multi_select 的每个 option 必须有"
+        "稳定 value 和用户可读 label；如 option 对应某一 ANY branch，填写 evidence_key。"
+        "boolean/number/date 至少提供一个 field；number_group 为所有实际缺失数值字段提供 fields；"
+        "对于 all group，所有当前缺失 slot 都必须有可提交控件；对于 any group，至少一个完整合法"
+        "branch 必须可提交。如果无法可靠结构化，也必须返回最接近的 structured schema 供 backend"
+        "校验和窄修复，不得自行输出 text_fallback。unknown / negative terminal actions 由系统"
+        "统一提供和处理，不能依赖 options，也不得为它们发明 evidence key。allow_other 表示"
+        "用户可选择补充自由文本。UI 选项必须由当前 Requirement 动态生成，不能套用固定学校或"
+        "固定考试答案。\n\n"
+        "当同一 language Requirement 的 any group 提供多种语言证明路径时，第一问只生成"
+        "single_select selector：每个 accepted proof branch 一个 option，fields 必须为空。"
+        "不得在该题同时生成 IELTS/TOEFL score fields 或非考试证明 field；用户选择考试后由代码"
+        "生成确定性的成绩表。非考试证明 option 只能使用其 canonical evidence key 和合法"
+        "evidence_value，不得发明 status 等 value_path。\n\n"
+        "Temporal applicability 只限制后续硬性 Gap 结论，不应阻止收集可复用的用户事实。"
+        "对于 previous_cycle 或 unknown 的 Requirement，如果学历、专业、成绩、语言、课程、"
+        "经历或材料状态仍可向用户收集，保持 matchable=true，并正常输出 evidence_needs 和"
+        "问题；backend 会在 Gap adjudication 时阻止硬性 not_met。not_yet_published 不生成"
+        "证据问题。\n\n"
+        f"Planner Input：{json.dumps(planner_payload, ensure_ascii=False)}\n"
         f"输出 JSON Schema：{json.dumps(output_schema, ensure_ascii=False)}\n"
         "只输出 JSON，不要解释。"
     )
-    content = await call_deepseek(
-        messages=[
-            {"role": "system", "content": "你只输出严格符合 schema 的 JSON，不使用任何工具。"},
-            {"role": "user", "content": prompt},
-        ],
-        max_tokens=4500,
-        response_format={"type": "json_object"},
-    )
-    try:
-        draft = GapPlannerOutput.model_validate_json(content)
-    except ValidationError as error:
+    messages = [
+        {"role": "system", "content": "你只输出严格符合 schema 的 JSON，不使用任何工具。"},
+        {"role": "user", "content": prompt},
+    ]
+    allowed_requirement_ids = {
+        item["requirement_id"] for item in formal_requirements
+    }
+    parsed_output: Optional[GapPlannerLLMOutput] = None
+    for attempt in range(2):
+        output_budget = (
+            GAP_PLANNER_INITIAL_MAX_OUTPUT_TOKENS
+            if attempt == 0
+            else GAP_PLANNER_RETRY_MAX_OUTPUT_TOKENS
+        )
+        attempt_messages = list(messages)
+        if attempt:
+            attempt_messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "上一次输出未形成完整合法 JSON。使用完全相同的 Planner Input，"
+                        "立即返回一份完整、合法、符合 schema 的 JSON；不要解释或省略闭合符号。"
+                    ),
+                }
+            )
+        try:
+            raw_result = await call_deepseek(
+                messages=attempt_messages,
+                max_tokens=output_budget,
+                response_format={"type": "json_object"},
+                include_metadata=True,
+                diagnostic_label=f"gap_planner attempt={attempt + 1}",
+            )
+        except HTTPException:
+            for formal in formal_requirements:
+                log_question_generation_diagnostics(
+                    "initial_generation_failed",
+                    GapQuestionGenerationDiagnostics(
+                        requirement_id=formal["requirement_id"],
+                        initial_failure_stage="initial_generation_failed",
+                        initial_validator_error="gap_planner_request_failed",
+                        final_failure_stage="initial_generation_failed",
+                    ),
+                )
+            raise
+        result = coerce_deepseek_text_result(raw_result)
+        try:
+            parsed_output = parse_gap_planner_output(result)
+            validate_gap_planner_business_output(
+                parsed_output,
+                allowed_requirement_ids,
+            )
+            break
+        except GapPlannerOutputError as error:
+            if error.kind in {"generation_incomplete", "malformed_json"} and attempt == 0:
+                logger.warning(
+                    "gap_planner_narrow_retry kind=%s next_attempt=2 output_budget=%d",
+                    error.kind,
+                    GAP_PLANNER_RETRY_MAX_OUTPUT_TOKENS,
+                )
+                continue
+            logger.error(
+                "gap_planner_failed kind=%s attempts=%d",
+                error.kind,
+                attempt + 1,
+            )
+            for formal in formal_requirements:
+                log_question_generation_diagnostics(
+                    "initial_generation_failed",
+                    GapQuestionGenerationDiagnostics(
+                        requirement_id=formal["requirement_id"],
+                        initial_failure_stage="initial_generation_failed",
+                        initial_validator_error=error.kind,
+                        final_failure_stage="initial_generation_failed",
+                    ),
+                )
+            raise HTTPException(
+                status_code=502,
+                detail="Gap Planner failed to produce a valid structured result",
+            ) from error
+    if parsed_output is None:
         raise HTTPException(
             status_code=502,
-            detail=f"DeepSeek returned an invalid Gap Plan: {error}",
-        ) from error
+            detail="Gap Planner failed to produce a valid structured result",
+        )
+    draft = materialize_gap_planner_output(parsed_output)
 
     formal_by_id = {item["requirement_id"]: item for item in formal_requirements}
     draft_by_id = {
@@ -2347,7 +6569,15 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
         for item in draft.requirements
         if item.requirement_id in formal_by_id
     }
-    reusable_by_key = {item.key.casefold(): item for item in reusable}
+    reusable_by_key = {canonical_evidence_key(item.key): item for item in reusable}
+    material_owner_count: Dict[str, int] = {}
+    for draft_item in draft_by_id.values():
+        for draft_need in draft_item.evidence_needs:
+            original_key = canonical_evidence_key(draft_need.key)
+            if standard_material_definition(original_key) is not None:
+                material_owner_count[original_key] = (
+                    material_owner_count.get(original_key, 0) + 1
+                )
     planned: List[GapPlannedRequirement] = []
     needs_by_key: Dict[str, GapEvidenceNeed] = {}
     for requirement_id, formal in formal_by_id.items():
@@ -2365,31 +6595,227 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
                     )
                 ],
             )
+        conditional_scope_source: Literal["none", "self", "parent"] = "none"
+        conditional_scope_text = formal["requirement"]
+        if formal.get("inherits_parent_applicability"):
+            conditional_scope_text = (
+                formal.get("parent_requirement_text") or formal["requirement"]
+            )
+            parent_scope_item = draft_by_id.get(
+                formal.get("parent_scope_requirement_id", "")
+            )
+            inherited_conditional = (
+                parent_scope_item.conditional
+                if parent_scope_item and parent_scope_item.conditional.is_conditional
+                else item.conditional
+                if item.conditional.is_conditional
+                else None
+            )
+            if inherited_conditional is not None:
+                controller_keys = {
+                    canonical_evidence_key(key)
+                    for key in inherited_conditional.controlling_evidence_keys
+                }
+                parent_needs = (
+                    parent_scope_item.evidence_needs if parent_scope_item else []
+                )
+                merged_needs = list(item.evidence_needs)
+                for parent_need in parent_needs:
+                    if (
+                        canonical_evidence_key(parent_need.key) in controller_keys
+                        and all(
+                            canonical_evidence_key(existing.key)
+                            != canonical_evidence_key(parent_need.key)
+                            for existing in merged_needs
+                        )
+                    ):
+                        merged_needs.append(parent_need)
+                inherited_other_items = list(item.other_items)
+                if parent_scope_item:
+                    for descriptor in parent_scope_item.other_items:
+                        if (
+                            canonical_evidence_key(descriptor.source_evidence_key)
+                            in controller_keys
+                            and all(
+                                canonical_evidence_key(existing.source_evidence_key)
+                                != canonical_evidence_key(descriptor.source_evidence_key)
+                                for existing in inherited_other_items
+                            )
+                        ):
+                            inherited_other_items.append(descriptor)
+                item = item.model_copy(
+                    update={
+                        "conditional": inherited_conditional,
+                        "evidence_needs": merged_needs,
+                        "other_items": inherited_other_items,
+                    }
+                )
+                conditional_scope_source = "parent"
+        elif item.conditional.is_conditional:
+            conditional_scope_source = "self"
         temporally_matchable = requirement_is_temporally_matchable(
             formal["temporal_applicability"]
         )
+        collects_evidence = requirement_allows_evidence_collection(
+            formal["temporal_applicability"]
+        )
+        deterministically_informational = formal.get("gap_eligibility") != "matchable"
+        user_matchable = item.matchable and not deterministically_informational
+        material_policy_by_key: Dict[
+            str, tuple[str, StandardMaterialType, str, bool]
+        ] = {}
+        if formal["category"] == "materials":
+            for need in item.evidence_needs:
+                definition = standard_material_definition(need.key)
+                if definition is None:
+                    continue
+                material_type, default_label = definition
+                is_recommendation_quantity = material_type == "recommendation_letters"
+                if need.evidence_type not in {"material_status", "material_quantity"}:
+                    continue
+                if need.evidence_type == "material_quantity" and not is_recommendation_quantity:
+                    continue
+                item_id = material_policy_item_id(requirement_id, material_type)
+                scoped_key = material_policy_evidence_key(
+                    item_id,
+                    quantity=is_recommendation_quantity,
+                )
+                material_policy_by_key[canonical_evidence_key(need.key)] = (
+                    scoped_key,
+                    material_type,
+                    item_id,
+                    is_recommendation_quantity,
+                )
+        normalized_constraint = item.constraint.model_copy(
+            update={
+                "options": [
+                    option.model_copy(
+                        update={
+                            "key": (
+                                "experience"
+                                if formal["category"] == "experience"
+                                else material_policy_by_key.get(
+                                    canonical_evidence_key(option.key),
+                                    (canonical_evidence_key(option.key), "cv", ""),
+                                )[0]
+                            ),
+                            "kind": (
+                                "material_quantity"
+                                if (
+                                    material_policy_by_key.get(
+                                        canonical_evidence_key(option.key)
+                                    )
+                                    and material_policy_by_key[
+                                        canonical_evidence_key(option.key)
+                                    ][3]
+                                )
+                                else option.kind
+                            ),
+                            "required_quantity": (
+                                option.required_quantity
+                                if option.required_quantity is not None
+                                else 1
+                                if (
+                                    material_policy_by_key.get(
+                                        canonical_evidence_key(option.key)
+                                    )
+                                    and material_policy_by_key[
+                                        canonical_evidence_key(option.key)
+                                    ][3]
+                                    and (option.kind or item.constraint.kind)
+                                    == "material_boolean"
+                                )
+                                else None
+                            ),
+                            "unit": (
+                                option.unit
+                                or (
+                                    "recommenders"
+                                    if (
+                                        material_policy_by_key.get(
+                                            canonical_evidence_key(option.key)
+                                        )
+                                        and material_policy_by_key[
+                                            canonical_evidence_key(option.key)
+                                        ][3]
+                                    )
+                                    else ""
+                                )
+                            ),
+                        }
+                    )
+                    for option in item.constraint.options
+                ]
+            }
+        )
         normalized_needs = []
         for need in item.evidence_needs:
+            original_canonical_key = (
+                "experience"
+                if need.evidence_type == "experience"
+                else canonical_evidence_key(need.key)
+            )
+            material_policy = material_policy_by_key.get(original_canonical_key)
+            canonical_key = (
+                material_policy[0] if material_policy else original_canonical_key
+            )
+            if material_policy and canonical_key not in reusable_by_key:
+                legacy_item = reusable_by_key.get(original_canonical_key)
+                if legacy_item and (
+                    material_owner_count.get(original_canonical_key) == 1
+                    or requirement_id in legacy_item.source_requirement_ids
+                ):
+                    reusable_by_key[canonical_key] = legacy_item.model_copy(
+                        update={"key": canonical_key}
+                    )
             matching_option = next(
                 (
                     option
-                    for option in item.constraint.options
-                    if option.key.casefold() == need.key.casefold()
+                    for option in normalized_constraint.options
+                    if canonical_evidence_key(option.key) == canonical_key
                 ),
                 None,
             )
+            canonical_need = need.model_copy(update={"key": canonical_key})
+            normalized_evidence_type: GapEvidenceType = (
+                "material_quantity"
+                if material_policy and material_policy[3]
+                else need.evidence_type
+            )
+            final_value_kind = (
+                "numeric"
+                if need.evidence_type == "courses"
+                and matching_option
+                and (matching_option.kind or normalized_constraint.kind)
+                == "course_credit"
+                else validated_evidence_value_kind(
+                    canonical_key,
+                    normalized_evidence_type,
+                    need.value_kind,
+                )
+            )
+            final_proof_kind = validated_language_proof_kind(
+                canonical_key,
+                need.proof_kind,
+            )
             normalized = need.model_copy(
                 update={
+                    "key": canonical_key,
+                    "evidence_type": normalized_evidence_type,
+                    "value_kind": final_value_kind,
+                    "proof_kind": final_proof_kind,
                     "required_fields": required_fields_for_evidence_need(
-                        need,
-                        item.constraint,
+                        canonical_need.model_copy(
+                            update={"evidence_type": normalized_evidence_type}
+                        ),
+                        normalized_constraint,
                     ),
                     "evidence_group": (
                         f"{requirement_id}:alternatives"
-                        if item.constraint.relation == "any"
+                        if normalized_constraint.relation == "any"
                         else requirement_id
                     ),
-                    "group_relation": item.constraint.relation,
+                    "group_relation": normalized_constraint.relation,
                     "minimum": matching_option.minimum if matching_option else None,
                     "component_minimum": (
                         matching_option.component_minimum if matching_option else None
@@ -2397,34 +6823,218 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
                     "required_quantity": (
                         matching_option.required_quantity if matching_option else None
                     ),
+                    "unit": matching_option.unit if matching_option else None,
+                    "material_type": material_policy[1] if material_policy else None,
+                    "item_id": material_policy[2] if material_policy else None,
+                    "label": (
+                        need.label
+                        or (
+                            STANDARD_MATERIAL_KEYS[original_canonical_key][1]
+                            if material_policy
+                            else ""
+                        )
+                    ),
                 }
             )
-            reusable_item = reusable_by_key.get(need.key.casefold())
+            reusable_item = reusable_by_key.get(canonical_key)
             normalized.already_known = bool(
                 reusable_item
                 and evidence_is_terminal_for_need(normalized, reusable_item)
             )
-            normalized_needs.append(normalized)
-            if item.matchable and temporally_matchable:
-                needs_by_key[need.key.casefold()] = normalized
+            if all(existing.key != canonical_key for existing in normalized_needs):
+                normalized_needs.append(normalized)
+        normalized_course_requirements = normalize_course_requirements(
+            requirement_id,
+            item.course_requirements,
+            normalized_needs,
+        )
+        course_item_source_keys = {
+            course_item.evidence_key
+            for course_item in normalized_course_requirements
+        }
+        course_credit_keys = {
+            canonical_evidence_key(option.key)
+            for option in normalized_constraint.options
+            if (option.kind or normalized_constraint.kind) == "course_credit"
+            and option.required_quantity is not None
+        }
+        normalized_needs = [
+            need
+            for need in normalized_needs
+            if need.key not in course_item_source_keys
+            or need.key in course_credit_keys
+        ]
+        for course_item in normalized_course_requirements:
+            course_item_label = (
+                f"{course_item.group_label} — {course_item.course_name}"
+                if course_item.group_label
+                else course_item.course_name
+            )
+            item_need = GapEvidenceNeed(
+                key=course_requirement_evidence_key(course_item.item_id),
+                evidence_type="courses",
+                value_kind="boolean",
+                label=course_item_label,
+                required_fields=["completed"],
+                evidence_group=requirement_id,
+                group_relation="all",
+            )
+            reusable_item = reusable_by_key.get(item_need.key)
+            item_need.already_known = bool(
+                reusable_item
+                and evidence_is_terminal_for_need(item_need, reusable_item)
+            )
+            normalized_needs.append(item_need)
+            if course_item.minimum_credits is not None and course_item.unit:
+                credit_need = GapEvidenceNeed(
+                    key=course_requirement_credit_evidence_key(course_item.item_id),
+                    evidence_type="courses",
+                    value_kind="numeric",
+                    label=course_item_label,
+                    required_fields=["quantity"],
+                    evidence_group=requirement_id,
+                    group_relation="all",
+                    required_quantity=course_item.minimum_credits,
+                    unit=course_item.unit,
+                )
+                reusable_credit = reusable_by_key.get(credit_need.key)
+                credit_need.already_known = bool(
+                    reusable_credit
+                    and evidence_is_terminal_for_need(credit_need, reusable_credit)
+                )
+                normalized_needs.append(credit_need)
+        normalized_other_items = normalize_other_descriptors(
+            requirement_id,
+            conditional_scope_text,
+            item.other_items,
+            normalized_needs,
+        )
+        other_key_map = {
+            other_item.source_evidence_key: other_item.evidence_key
+            for other_item in normalized_other_items
+        }
+        if other_key_map:
+            normalized_constraint = normalized_constraint.model_copy(
+                update={
+                    "options": [
+                        option.model_copy(
+                            update={
+                                "key": other_key_map.get(option.key, option.key)
+                            }
+                        )
+                        for option in normalized_constraint.options
+                    ]
+                }
+            )
+            normalized_needs = [
+                need for need in normalized_needs if need.key not in other_key_map
+            ]
+            for other_item in normalized_other_items:
+                required_field = {
+                    "boolean": "status",
+                    "numeric": "quantity",
+                    "single_select": "description",
+                    "multi_select": "description",
+                    "short_text": "description",
+                }[other_item.value_kind]
+                normalized_need = GapEvidenceNeed(
+                    key=other_item.evidence_key,
+                    evidence_type="generic",
+                    value_kind=(
+                        "boolean"
+                        if other_item.value_kind == "boolean"
+                        else "numeric"
+                        if other_item.value_kind == "numeric"
+                        else "categorical"
+                        if other_item.value_kind in {"single_select", "multi_select"}
+                        else "text"
+                    ),
+                    label=other_item.label,
+                    required_fields=[required_field],
+                    evidence_group=requirement_id,
+                    group_relation=normalized_constraint.relation,
+                    item_id=other_item.item_id,
+                    other_value_kind=other_item.value_kind,
+                    other_options=other_item.options,
+                )
+                existing_other = reusable_by_key.get(normalized_need.key)
+                normalized_need.already_known = bool(
+                    existing_other
+                    and evidence_is_terminal_for_need(
+                        normalized_need, existing_other
+                    )
+                )
+                normalized_needs.append(normalized_need)
+        conditional_metadata = item.conditional.model_copy(
+            update={
+                "controlling_evidence_keys": [
+                    other_key_map.get(
+                        canonical_evidence_key(key),
+                        material_policy_by_key.get(
+                            canonical_evidence_key(key),
+                            (canonical_evidence_key(key), "cv", "", False),
+                        )[0],
+                    )
+                    for key in item.conditional.controlling_evidence_keys
+                ],
+                "predicates": [
+                    predicate.model_copy(
+                        update={
+                            "evidence_key": other_key_map.get(
+                                canonical_evidence_key(predicate.evidence_key),
+                                material_policy_by_key.get(
+                                    canonical_evidence_key(predicate.evidence_key),
+                                    (
+                                        canonical_evidence_key(predicate.evidence_key),
+                                        "cv",
+                                        "",
+                                        False,
+                                    ),
+                                )[0],
+                            )
+                        }
+                    )
+                    for predicate in item.conditional.predicates
+                ],
+            }
+        )
+        normalized_conditional = normalize_conditional_metadata(
+            requirement_id,
+            conditional_scope_text,
+            conditional_metadata,
+            normalized_needs,
+        )
+        if not normalized_conditional.is_conditional:
+            conditional_scope_source = "none"
         match_strategy = item.match_strategy
-        option_kinds = {option.kind for option in item.constraint.options if option.kind}
+        option_kinds = {option.kind for option in normalized_constraint.options if option.kind}
         if formal["category"] == "materials" and (
-            item.constraint.kind in {"material_boolean", "material_quantity"}
+            normalized_constraint.kind in {"material_boolean", "material_quantity"}
             or option_kinds
             and option_kinds <= {"material_boolean", "material_quantity"}
         ):
             match_strategy = "deterministic"
         elif formal["category"] in {
             "academic", "language", "standardized_test"
-        } and item.constraint.kind == "score":
+        } and normalized_constraint.kind == "score":
+            match_strategy = "deterministic"
+        elif formal["category"] == "course" and (
+            normalized_course_requirements
+            or normalized_constraint.kind == "course_credit"
+            or "course_credit" in option_kinds
+        ):
             match_strategy = "deterministic"
         planned.append(
             GapPlannedRequirement(
                 **formal,
-                matchable=item.matchable and temporally_matchable,
+                user_matchable=user_matchable,
+                matchable=user_matchable and temporally_matchable,
                 informational_reason=(
-                    item.informational_reason
+                    (
+                        formal.get("gap_eligibility", "")
+                        if deterministically_informational
+                        else item.informational_reason
+                    )
                     if temporally_matchable
                     else temporal_gap_explanation(
                         formal["temporal_applicability"],
@@ -2433,20 +7043,132 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
                     )[1]
                 ),
                 match_strategy=match_strategy,
-                evidence_needs=normalized_needs if temporally_matchable else [],
+                evidence_needs=(
+                    normalized_needs
+                    if user_matchable and collects_evidence
+                    else []
+                ),
                 constraint=(
-                    item.constraint
-                    if temporally_matchable
+                    normalized_constraint
+                    if user_matchable and collects_evidence
                     else GapDeterministicConstraint()
+                ),
+                course_requirements=(
+                    normalized_course_requirements
+                    if user_matchable and collects_evidence
+                    else []
+                ),
+                conditional=normalized_conditional,
+                conditional_scope_source=conditional_scope_source,
+                other_items=(
+                    normalized_other_items
+                    if user_matchable and collects_evidence
+                    else []
                 ),
             )
         )
 
-    questions = []
-    covered_missing_keys = set()
-    reusable_any_groups: Dict[str, List[GapEvidenceNeed]] = {}
-    for item in planned:
+    planned = [
+        item.model_copy(
+            update={
+                "conditional_state": resolve_conditional_state(
+                    item, reusable_by_key
+                )
+            }
+        )
+        for item in planned
+    ]
+    question_policy_requirements = conditional_question_policy_view(planned)
+    conditional_controller_keys_by_requirement = {
+        item.requirement_id: {
+            canonical_evidence_key(key)
+            for key in item.conditional.controlling_evidence_keys
+        }
+        for item in question_policy_requirements
+        if item.conditional_state == "pending"
+    }
+    needs_by_requirement = {
+        item.requirement_id: {need.key: need for need in item.evidence_needs}
+        for item in question_policy_requirements
+    }
+    requirement_ids_by_key: Dict[str, List[str]] = {}
+    for item in question_policy_requirements:
         for need in item.evidence_needs:
+            requirement_ids_by_key.setdefault(need.key, []).append(
+                item.requirement_id
+            )
+    requirement_order = {
+        item.requirement_id: index
+        for index, item in enumerate(question_policy_requirements)
+    }
+
+    questions, covered_missing_keys = build_backend_academic_questions(
+        question_policy_requirements,
+        reusable_by_key,
+    )
+    language_questions, language_covered_keys = build_backend_language_questions(
+        question_policy_requirements,
+        reusable_by_key,
+    )
+    questions.extend(language_questions)
+    covered_missing_keys.update(language_covered_keys)
+    course_questions, course_covered_keys = build_backend_course_questions(
+        question_policy_requirements,
+        reusable_by_key,
+    )
+    questions.extend(course_questions)
+    covered_missing_keys.update(course_covered_keys)
+    gre_questions, gre_covered_keys = build_backend_gre_questions(
+        question_policy_requirements,
+        reusable_by_key,
+    )
+    questions.extend(gre_questions)
+    covered_missing_keys.update(gre_covered_keys)
+    experience_questions, experience_covered_keys = build_backend_experience_questions(
+        question_policy_requirements,
+        reusable_by_key,
+    )
+    questions.extend(experience_questions)
+    covered_missing_keys.update(experience_covered_keys)
+    material_questions, material_covered_keys = build_backend_material_questions(
+        question_policy_requirements,
+        reusable_by_key,
+    )
+    questions.extend(material_questions)
+    covered_missing_keys.update(material_covered_keys)
+    controller_questions, controller_covered_keys = (
+        build_backend_conditional_controller_questions(
+            question_policy_requirements,
+            reusable_by_key,
+            covered_missing_keys,
+        )
+    )
+    questions.extend(controller_questions)
+    covered_missing_keys.update(controller_covered_keys)
+    other_policy_requirements = [
+        item.model_copy(
+            update={
+                "other_items": [
+                    other_item
+                    for other_item in item.other_items
+                    if other_item.evidence_key not in controller_covered_keys
+                ]
+            }
+        )
+        for item in question_policy_requirements
+    ]
+    other_questions, other_covered_keys = build_backend_other_questions(
+        other_policy_requirements,
+        reusable_by_key,
+    )
+    questions.extend(other_questions)
+    covered_missing_keys.update(other_covered_keys)
+    reusable_any_groups: Dict[str, List[GapEvidenceNeed]] = {}
+    needs_by_group: Dict[str, List[GapEvidenceNeed]] = {}
+    for item in question_policy_requirements:
+        for need in item.evidence_needs:
+            if need.evidence_group:
+                needs_by_group.setdefault(need.evidence_group, []).append(need)
             if need.evidence_group and need.group_relation == "any":
                 reusable_any_groups.setdefault(need.evidence_group, []).append(need)
     satisfied_reusable_groups = {
@@ -2460,73 +7182,250 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
     }
     ai_reference_keys = {
         need.key.casefold()
-        for item in planned
+        for item in question_policy_requirements
         if item.requirement_verification_status == "model_memory_unverified"
         for need in item.evidence_needs
     }
-    for question in draft.questions:
+    def append_owned_question(
+        question: GapPlannerQuestion,
+        question_requirement_id: str,
+        base_keys: List[str],
+        *,
+        reconstructed: bool,
+    ) -> None:
+        question_needs_by_key = needs_by_requirement[question_requirement_id]
+        authoritative_keys = [
+            key for key in base_keys if key in question_needs_by_key
+        ]
+        referenced_groups = {
+            question_needs_by_key[key].evidence_group
+            for key in authoritative_keys
+            if key in question_needs_by_key
+            and question_needs_by_key[key].evidence_group
+        }
+        for group in referenced_groups:
+            authoritative_keys.extend(
+                need.key
+                for need in needs_by_group.get(group, [])
+                if need.key in question_needs_by_key
+            )
+        authoritative_keys = list(dict.fromkeys(authoritative_keys))
         missing_keys = [
             key
-            for key in question.evidence_keys
-            if key.casefold() in needs_by_key
-            and not needs_by_key[key.casefold()].already_known
-            and needs_by_key[key.casefold()].evidence_group
+            for key in authoritative_keys
+            if key in question_needs_by_key
+            and key not in covered_missing_keys
+            and key
+            not in conditional_controller_keys_by_requirement.get(
+                question_requirement_id, set()
+            )
+            and not question_needs_by_key[key].already_known
+            and question_needs_by_key[key].evidence_group
             not in satisfied_reusable_groups
         ]
         if not missing_keys:
-            continue
-        question_text = question.question
+            return
+        missing_needs = [question_needs_by_key[key] for key in missing_keys]
+        question_text = (
+            safe_owned_question_prompt(missing_needs)
+            if reconstructed
+            else question.question
+        )
         if (
             any(key.casefold() in ai_reference_keys for key in missing_keys)
             and "AI 参考" not in question_text
             and "AI参考" not in question_text
         ):
             question_text = f"根据目前的 AI 参考信息，该项目可能有相关要求。{question_text}"
+        if reconstructed or set(missing_keys) != set(authoritative_keys):
+            filtered_fields = [
+                field
+                for field in question.fields
+                if canonical_evidence_key(field.evidence_key)
+                in missing_keys
+            ]
+            filtered_options = [
+                option
+                for option in question.options
+                if option.evidence_key
+                and canonical_evidence_key(option.evidence_key)
+                in missing_keys
+            ]
+        else:
+            filtered_fields = question.fields
+            filtered_options = question.options
         questions.append(
-            question.model_copy(
-                update={
-                    "question": question_text,
-                    "evidence_keys": missing_keys,
-                }
+            normalize_question_schema_safely(
+                question.model_copy(
+                    update={
+                        "question_id": (
+                            f"{question.question_id}:{question_requirement_id}"
+                            if reconstructed
+                            else question.question_id
+                        ),
+                        "question": question_text,
+                        "prompt": question_text,
+                        "requirement_id": question_requirement_id,
+                        "fields": filtered_fields,
+                        "options": filtered_options,
+                    }
+                ),
+                missing_keys,
+                question_needs_by_key,
+                reusable_by_key,
             )
         )
-        covered_missing_keys.update(key.casefold() for key in missing_keys)
+        covered_missing_keys.update(missing_keys)
 
-    for item in planned:
-        if not item.matchable:
+    for question in draft.questions:
+        if not (question.prompt or question.question).strip():
+            logger.warning("invalid_gap_question_prompt dropped")
+            continue
+        canonical_question_keys = list(
+            dict.fromkeys(canonical_evidence_key(key) for key in question.evidence_keys)
+        )
+        schema_referenced_keys = list(canonical_question_keys)
+        schema_referenced_keys.extend(
+            canonical_evidence_key(field.evidence_key)
+            for field in question.fields
+        )
+        schema_referenced_keys.extend(
+            canonical_evidence_key(option.evidence_key)
+            for option in question.options
+            if option.evidence_key
+        )
+        schema_referenced_keys = list(dict.fromkeys(schema_referenced_keys))
+        referenced_requirement_ids = {
+            requirement_id
+            for key in schema_referenced_keys
+            for requirement_id in requirement_ids_by_key.get(key, [])
+        }
+        declared_requirement_id = question.requirement_id
+        declared_is_valid = (
+            declared_requirement_id in needs_by_requirement
+            if declared_requirement_id
+            else False
+        )
+        owner_candidates: Optional[Set[str]] = None
+        for key in schema_referenced_keys:
+            key_owners = set(requirement_ids_by_key.get(key, []))
+            if not key_owners:
+                continue
+            owner_candidates = (
+                key_owners
+                if owner_candidates is None
+                else owner_candidates.intersection(key_owners)
+            )
+        declared_owns_all = bool(
+            declared_is_valid
+            and all(
+                key not in requirement_ids_by_key
+                or declared_requirement_id in requirement_ids_by_key[key]
+                for key in schema_referenced_keys
+            )
+        )
+        if declared_owns_all:
+            append_owned_question(
+                question,
+                declared_requirement_id,
+                canonical_question_keys,
+                reconstructed=False,
+            )
+            continue
+        if not declared_requirement_id and owner_candidates:
+            question_requirement_id = min(
+                owner_candidates,
+                key=lambda requirement_id: requirement_order[requirement_id],
+            )
+            append_owned_question(
+                question,
+                question_requirement_id,
+                canonical_question_keys,
+                reconstructed=False,
+            )
+            continue
+        if referenced_requirement_ids:
+            logger.warning(
+                "cross_requirement_gap_question question_id=%s requirement_count=%d reconstructed=true",
+                question.question_id,
+                len(referenced_requirement_ids),
+            )
+            for requirement_id in sorted(
+                referenced_requirement_ids,
+                key=lambda item: requirement_order[item],
+            ):
+                owned_keys = [
+                    key
+                    for key in schema_referenced_keys
+                    if requirement_id in requirement_ids_by_key.get(key, [])
+                ]
+                append_owned_question(
+                    question,
+                    requirement_id,
+                    owned_keys,
+                    reconstructed=True,
+                )
+            continue
+        logger.warning(
+            "unowned_gap_question question_id=%s dropped=true",
+            question.question_id,
+        )
+        ownership_diagnostics = GapQuestionGenerationDiagnostics(
+            requirement_id=question.requirement_id,
+            allowed_evidence_keys=schema_referenced_keys,
+            group_relation=question.group_relation,
+            initial_schema=question_schema_snapshot(question),
+            initial_failure_stage="ownership_failed",
+            initial_validator_error="requirement_ownership_failed",
+            final_failure_stage="ownership_failed",
+        )
+        log_question_generation_diagnostics(
+            "ownership_failed",
+            ownership_diagnostics,
+        )
+
+    for item in question_policy_requirements:
+        if not item.evidence_needs:
             continue
         missing_needs = [
             need
             for need in item.evidence_needs
             if not need.already_known
             and need.key.casefold() not in covered_missing_keys
+            and need.key
+            not in conditional_controller_keys_by_requirement.get(
+                item.requirement_id, set()
+            )
             and need.evidence_group not in satisfied_reusable_groups
         ]
         if not missing_needs:
             continue
-        labels = "、".join(need.label or need.key for need in missing_needs)
         question_prefix = (
             "根据目前的 AI 参考信息，该项目可能有这项要求。"
             if item.requirement_verification_status == "model_memory_unverified"
             else ""
         )
-        question = GapPlannerQuestion(
-            question_id=f"q:{item.requirement_id}",
-            question=(
-                f"{question_prefix}为了判断“{item.requirement}”，请补充：{labels}。"
-                "不知道或暂时没有也可以直接说明。"
-            ),
-            evidence_keys=[need.key for need in missing_needs],
+        questions.append(
+            missing_structured_question(
+                item,
+                missing_needs,
+                prompt=f"{question_prefix}{safe_owned_question_prompt(missing_needs)}",
+            )
         )
-        questions.append(question)
-        covered_missing_keys.update(need.key.casefold() for need in missing_needs)
+        covered_missing_keys.update(need.key for need in missing_needs)
 
+    questions, repair_calls = await repair_gap_questions_once(
+        questions,
+        {item.requirement_id: item for item in question_policy_requirements},
+        reusable_by_key,
+    )
+    scope_legacy_material_evidence(planned, reusable_by_key)
     return GapPlan(
         target_program=request.target_program,
-        requirements=planned,
+        requirements=[*planned, *excluded_requirements],
         questions=questions,
-        reusable_evidence=reusable,
-        planning_llm_requests=1,
+        reusable_evidence=list(reusable_by_key.values()),
+        planning_llm_requests=1 + repair_calls,
     )
 
 
@@ -2536,12 +7435,51 @@ async def gap_plan_endpoint(request: GapPlanRequest) -> GapPlan:
     return await build_gap_plan(request)
 
 
+@app.post(
+    "/gap/questions/repair",
+    response_model=GapPlannerQuestion,
+    tags=["gap"],
+)
+async def gap_question_repair_endpoint(
+    request: GapQuestionRepairRequest,
+) -> GapPlannerQuestion:
+    """Run one user-requested narrow repair for a single invalid question schema."""
+    reusable = merge_reusable_evidence(
+        request.user_profile,
+        request.user_evidence,
+    )
+    diagnostics = request.question.generation_diagnostics
+    if diagnostics:
+        diagnostics = diagnostics.model_copy(
+            update={
+                "repair_schema": None,
+                "repair_failure_stage": None,
+                "repair_validator_error": None,
+                "final_failure_stage": None,
+            }
+        )
+    repaired, _ = await repair_gap_questions_once(
+        [
+            request.question.model_copy(
+                update={
+                    "schema_status": "invalid",
+                    "repair_attempts": 0,
+                    "generation_diagnostics": diagnostics,
+                }
+            )
+        ],
+        {request.requirement.requirement_id: request.requirement},
+        {canonical_evidence_key(item.key): item for item in reusable},
+    )
+    return repaired[0]
+
+
 UNKNOWN_ANSWER_MARKERS = (
     "不知道", "不记得", "不清楚", "不了解", "忘了", "忘记", "不确定", "无法提供", "记不清",
 )
 NEGATIVE_ANSWER_MARKERS = (
     "没有", "没考", "未考", "没修过", "未修过", "没学过", "未学过", "没上过", "未上过",
-    "未准备", "还没准备", "暂无", "暂时没有", "没有准备", "无",
+    "未准备", "还没准备", "暂无", "暂时没有", "没有准备", "没相关", "无",
 )
 
 EVIDENCE_ALIASES_BY_KEY = {
@@ -2549,8 +7487,10 @@ EVIDENCE_ALIASES_BY_KEY = {
     "toefl": ("toefl", "托福"),
     "gre": ("gre",),
     "gmat": ("gmat",),
-    "gpa": ("gpa",),
+    "gpa": ("gpa", "绩点"),
     "average_score": ("average", "平均分", "均分"),
+    "degree_classification": ("degree classification", "degree class", "学位等级", "学位"),
+    "experience": ("experience", "经历", "经验", "实习", "工作", "科研", "项目"),
     "portfolio": ("portfolio", "作品集"),
     "recommendations": ("recommend", "reference", "推荐信", "推荐人"),
     "statement_of_purpose": ("statement of purpose", "personal statement", "sop", "个人陈述", "动机信"),
@@ -2562,14 +7502,12 @@ EVIDENCE_ALIASES_BY_KEY = {
 
 
 def evidence_aliases(key: str) -> tuple[str, ...]:
-    return next(
-        (
-            aliases
-            for marker, aliases in EVIDENCE_ALIASES_BY_KEY.items()
-            if marker in key.casefold()
-        ),
-        (),
-    )
+    matches = [
+        (len(marker), aliases)
+        for marker, aliases in EVIDENCE_ALIASES_BY_KEY.items()
+        if marker in key.casefold()
+    ]
+    return max(matches, default=(0, ()))[1]
 
 
 def answer_mentions_evidence_key(answer: str, key: str) -> bool:
@@ -2599,6 +7537,13 @@ def parse_expected_education_values(
         remainder = university_match.group(2).strip()
         if major_key in expected and remainder:
             values[major_key] = remainder
+        return values
+
+    if len(expected) == 1 and cleaned:
+        if university_key in expected:
+            values[university_key] = cleaned
+        elif major_key in expected:
+            values[major_key] = cleaned
         return values
 
     parts = [part for part in re.split(r"\s+|[，,；;]", cleaned) if part]
@@ -2794,6 +7739,151 @@ def evidence_answer_clause(answer: str, key: str) -> str:
     return answer[start:end]
 
 
+NUMERIC_EVIDENCE_FIELDS = {"score", "scale", "quantity", "duration"}
+
+
+def contextual_numeric_values(
+    answer: str,
+    question_keys: List[str],
+    need_by_key: Dict[str, GapEvidenceNeed],
+    existing_by_key: Dict[str, UserEvidence],
+) -> Dict[str, tuple[Any, str]]:
+    numeric_slots = []
+    for key in question_keys:
+        need = need_by_key.get(key.casefold())
+        if need is None:
+            continue
+        required_fields = need.required_fields or required_fields_for_evidence_need(
+            need,
+            GapDeterministicConstraint(),
+        )
+        existing = existing_by_key.get(key.casefold())
+        if existing and existing.availability == "known":
+            required_fields = missing_evidence_fields(need, existing.value)
+        elif existing and existing.availability in {"known_negative", "unknown"}:
+            required_fields = []
+        numeric_slots.extend(
+            (need.key, field)
+            for field in required_fields
+            if field in NUMERIC_EVIDENCE_FIELDS
+        )
+    if len(numeric_slots) != 1:
+        return {}
+
+    numeric_clauses = []
+    for clause in re.split(r"[，,；;。\n]", answer):
+        stripped = clause.strip()
+        if not stripped or any(
+            marker in stripped.casefold()
+            for marker in (*UNKNOWN_ANSWER_MARKERS, *NEGATIVE_ANSWER_MARKERS)
+        ):
+            continue
+        numbers = re.findall(r"(?<![A-Za-z])\d+(?:\.\d+)?", stripped)
+        if len(numbers) == 1:
+            numeric_clauses.append((float(numbers[0]), stripped))
+    if len(numeric_clauses) != 1:
+        return {}
+
+    key, field = numeric_slots[0]
+    number, clause = numeric_clauses[0]
+    return {key.casefold(): ({field: number}, clause)}
+
+
+def classification_like_answer(answer: str) -> bool:
+    normalized = re.sub(r"\s+", " ", answer.strip().casefold()).strip("，,；;。.!！")
+    chinese = re.fullmatch(
+        r"(?:本科)?(?:一等|二等一|二等二|二等一级|二等二级|三等)(?:荣誉)?(?:学位)?",
+        normalized,
+    )
+    english = re.fullmatch(
+        r"(?:first(?:[- ]class)?|upper[- ]second(?:[- ]class)?|"
+        r"lower[- ]second(?:[- ]class)?|second[- ]class[- ]upper|"
+        r"second[- ]class[- ]lower|2\s*:\s*1|2\s*:\s*2)(?:\s+(?:degree|honours?))?",
+        normalized,
+    )
+    return bool(chinese or english)
+
+
+def contextual_any_group_values(
+    answer: str,
+    question_keys: List[str],
+    need_by_key: Dict[str, GapEvidenceNeed],
+    existing_by_key: Dict[str, UserEvidence],
+) -> tuple[Dict[str, tuple[Any, str]], List[str], set[str]]:
+    """Choose an academic ANY branch from value form without requiring field aliases."""
+    question_key_set = {key.casefold() for key in question_keys}
+    groups: Dict[str, List[GapEvidenceNeed]] = {}
+    for need in need_by_key.values():
+        if (
+            need.key.casefold() in question_key_set
+            and need.evidence_group
+            and need.group_relation == "any"
+        ):
+            groups.setdefault(need.evidence_group, []).append(need)
+
+    values: Dict[str, tuple[Any, str]] = {}
+    clarification_slots: List[str] = []
+    clarification_keys: set[str] = set()
+    stripped = answer.strip()
+    lowered = stripped.casefold()
+    numbers = re.findall(r"(?<![A-Za-z])\d+(?:\.\d+)?", stripped)
+    for needs in groups.values():
+        if any(
+            evidence_satisfies_need(need, existing_by_key[need.key.casefold()])
+            for need in needs
+            if need.key.casefold() in existing_by_key
+        ):
+            continue
+        classification_need = next(
+            (
+                need
+                for need in needs
+                if need.key.casefold().rsplit(".", 1)[-1] == "degree_classification"
+            ),
+            None,
+        )
+        gpa_need = next(
+            (need for need in needs if need.key.casefold().rsplit(".", 1)[-1] == "gpa"),
+            None,
+        )
+        average_need = next(
+            (
+                need
+                for need in needs
+                if need.key.casefold().rsplit(".", 1)[-1] == "average_score"
+            ),
+            None,
+        )
+        if classification_need and classification_like_answer(stripped):
+            values[classification_need.key.casefold()] = (
+                {"description": stripped},
+                stripped,
+            )
+            continue
+        if len(numbers) != 1 or not (gpa_need and average_need):
+            continue
+        number = float(numbers[0])
+        has_gpa_semantics = bool(re.search(r"\bgpa\b|绩点", lowered, re.IGNORECASE))
+        has_average_semantics = bool(
+            re.search(r"平均分|均分|average(?:\s+score)?|百分制", lowered, re.IGNORECASE)
+            or re.fullmatch(r"\s*\d+(?:\.\d+)?\s*分\s*", stripped)
+        )
+        if has_gpa_semantics and not has_average_semantics:
+            values[gpa_need.key.casefold()] = ({"score": number}, stripped)
+        elif has_average_semantics and not has_gpa_semantics:
+            values[average_need.key.casefold()] = ({"score": number}, stripped)
+        elif re.fullmatch(r"\s*\d+(?:\.\d+)?\s*", stripped):
+            clarification_keys.update(need.key.casefold() for need in needs)
+            for need in (gpa_need, average_need):
+                required_fields = need.required_fields or ["score"]
+                clarification_slots.extend(
+                    f"{need.key}.{field}"
+                    for field in required_fields
+                    if field in NUMERIC_EVIDENCE_FIELDS
+                )
+    return values, list(dict.fromkeys(clarification_slots)), clarification_keys
+
+
 def parse_evidence_value(key: str, answer: str) -> Any:
     lowered_key = key.casefold()
     key_leaf = lowered_key.rsplit(".", 1)[-1]
@@ -2875,10 +7965,49 @@ def missing_evidence_fields(need: GapEvidenceNeed, value: Any) -> List[str]:
         need,
         GapDeterministicConstraint(),
     )
+    if need.other_value_kind is not None:
+        if (
+            need.other_value_kind == "boolean"
+            and isinstance(value, dict)
+            and isinstance(value.get("matches_condition"), bool)
+        ):
+            return []
+        typed_value = value.get("value") if isinstance(value, dict) else None
+        if need.other_value_kind == "boolean":
+            complete = isinstance(typed_value, bool)
+        elif need.other_value_kind == "numeric":
+            complete = isinstance(typed_value, (int, float)) and not isinstance(
+                typed_value, bool
+            )
+        elif need.other_value_kind in {"single_select", "short_text"}:
+            complete = isinstance(typed_value, str) and bool(typed_value.strip())
+        else:
+            complete = isinstance(typed_value, list) and bool(typed_value)
+        return [] if complete else required_fields
     if not isinstance(value, dict):
         if required_fields == ["description"] and value not in (None, "", []):
             return []
         return required_fields
+    if need.evidence_type == "experience":
+        has_experience = value.get("has_experience")
+        if has_experience is False:
+            return []
+        missing = []
+        if has_experience is not True:
+            missing.append("has_experience")
+        experience_types = value.get("experience_types")
+        if not isinstance(experience_types, list) or not experience_types:
+            missing.append("experience_types")
+        duration = value.get("duration")
+        if not isinstance(duration, dict) or not isinstance(
+            duration.get("quantity"), (int, float)
+        ):
+            missing.append("duration")
+        if not isinstance(duration, dict) or duration.get("unit") not in {
+            "months", "years"
+        }:
+            missing.append("unit")
+        return [field for field in required_fields if field in missing]
     missing = []
     for field in required_fields:
         if field in {"listening", "reading", "writing", "speaking"}:
@@ -2911,6 +8040,13 @@ def evidence_slot_label(slot: str) -> str:
         "description": "具体信息",
         "status": "准备状态",
     }
+    friendly_name = friendly_evidence_name(key)
+    if friendly_name != "相关信息":
+        if field == "description":
+            return friendly_name
+        if field == "score":
+            return f"{friendly_name}分数"
+        return f"{friendly_name}{field_labels.get(field, field)}"
     return f"{key} 的{field_labels.get(field, field)}"
 
 
@@ -2949,15 +8085,62 @@ def evidence_is_terminal_for_need(
     return item.availability == "known" and not missing_evidence_fields(need, item.value)
 
 
+IELTS_COMPONENT_FIELDS = ("listening", "reading", "writing", "speaking")
+
+
+def collective_ielts_component_value(
+    answer: str,
+    need: GapEvidenceNeed,
+    existing: Optional[UserEvidence],
+) -> Optional[Dict[str, Any]]:
+    if canonical_evidence_key(need.key) != "ielts":
+        return None
+    required_fields = need.required_fields or ["score"]
+    existing_value = (
+        existing.value
+        if existing and existing.availability == "known" and isinstance(existing.value, dict)
+        else {}
+    )
+    missing_fields = missing_evidence_fields(need, existing_value)
+    if not missing_fields or any(
+        field not in IELTS_COMPONENT_FIELDS for field in missing_fields
+    ):
+        return None
+    match = re.fullmatch(
+        r"\s*(?:(?:四项|各项)\s*)?(?:都是|全部(?:都是)?|全是)\s*[:：]?\s*"
+        r"(\d+(?:\.\d+)?)\s*[。.!！]?\s*",
+        answer,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    score = float(match.group(1))
+    return {
+        "subscores": {field: score for field in missing_fields},
+    }
+
+
 def parse_gap_evidence(request: GapEvidenceParseRequest) -> GapEvidenceParseResponse:
     now = datetime.now(timezone.utc).isoformat()
     evidence = []
     missing_slots = []
-    need_by_key = {need.key.casefold(): need for need in request.evidence_needs}
+    canonical_needs = [
+        need.model_copy(update={"key": canonical_evidence_key(need.key)})
+        for need in request.evidence_needs
+    ]
+    need_by_key = {need.key: need for need in canonical_needs}
     existing_by_key = {
-        item.key.casefold(): item for item in request.existing_evidence
+        canonical_evidence_key(item.key): item.model_copy(
+            update={"key": canonical_evidence_key(item.key)}
+        )
+        for item in request.existing_evidence
     }
-    multiple_keys = len(request.question.evidence_keys) > 1
+    question_keys = list(
+        dict.fromkeys(
+            canonical_evidence_key(key) for key in request.question.evidence_keys
+        )
+    )
+    multiple_keys = len(question_keys) > 1
     stripped_answer = request.answer.strip().casefold()
     globally_unknown = bool(
         re.fullmatch(r"(?:我)?(?:都|全部)?(?:不知道|不记得|不清楚|不了解|不确定|记不清|无法提供)[。.!！]?", stripped_answer)
@@ -2967,18 +8150,40 @@ def parse_gap_evidence(request: GapEvidenceParseRequest) -> GapEvidenceParseResp
     )
     education_values = parse_expected_education_values(
         request.answer,
-        request.question.evidence_keys,
+        question_keys,
     )
-    for key in request.question.evidence_keys:
-        need = need_by_key.get(key.casefold())
+    any_group_values, clarification_slots, clarification_group_keys = (
+        contextual_any_group_values(
+            request.answer,
+            question_keys,
+            need_by_key,
+            existing_by_key,
+        )
+    )
+    numeric_values = contextual_numeric_values(
+        request.answer,
+        question_keys,
+        need_by_key,
+        existing_by_key,
+    )
+    numeric_values.update(any_group_values)
+    for key in question_keys:
+        need = need_by_key.get(key)
         if need is None:
             continue
+        collective_ielts = collective_ielts_component_value(
+            request.answer,
+            need,
+            existing_by_key.get(key),
+        )
+        if collective_ielts is not None:
+            numeric_values[key] = (collective_ielts, request.answer)
         required_fields = need.required_fields or required_fields_for_evidence_need(
             need,
             GapDeterministicConstraint(),
         )
-        education_value = education_values.get(need.key.casefold())
-        if need.key.casefold() in {"education.university", "education.major"}:
+        education_value = education_values.get(need.key)
+        if need.key in {"education.university", "education.major"}:
             if globally_unknown:
                 availability: EvidenceAvailability = "unknown"
                 value = None
@@ -3028,9 +8233,11 @@ def parse_gap_evidence(request: GapEvidenceParseRequest) -> GapEvidenceParseResp
             )
             continue
         compound_availability = compound_material_availability(request.answer, key)
+        contextual_numeric = numeric_values.get(need.key)
         if (
             multiple_keys
             and compound_availability is None
+            and contextual_numeric is None
             and not globally_unknown
             and not globally_negative
             and not answer_mentions_evidence_key(request.answer, key)
@@ -3038,7 +8245,9 @@ def parse_gap_evidence(request: GapEvidenceParseRequest) -> GapEvidenceParseResp
             missing_slots.extend(f"{need.key}.{field}" for field in required_fields)
             continue
         clause = (
-            request.answer
+            contextual_numeric[1]
+            if contextual_numeric is not None
+            else request.answer
             if not multiple_keys
             else evidence_answer_clause(request.answer, key)
         ).strip()
@@ -3046,15 +8255,21 @@ def parse_gap_evidence(request: GapEvidenceParseRequest) -> GapEvidenceParseResp
             availability = compound_availability
         elif globally_unknown or any(marker in clause.casefold() for marker in UNKNOWN_ANSWER_MARKERS):
             availability: EvidenceAvailability = "unknown"
-        elif globally_negative or any(marker in clause.casefold() for marker in NEGATIVE_ANSWER_MARKERS) or clause.strip() == "0":
+        elif globally_negative or any(marker in clause.casefold() for marker in NEGATIVE_ANSWER_MARKERS):
             availability = "known_negative"
         else:
             availability = "known"
-        value = parse_evidence_value(key, clause) if availability == "known" else None
+        value = (
+            contextual_numeric[0]
+            if availability == "known" and contextual_numeric is not None
+            else parse_evidence_value(key, clause)
+            if availability == "known"
+            else None
+        )
         if availability == "known" and value is None:
             missing_slots.extend(f"{need.key}.{field}" for field in required_fields)
             continue
-        existing = existing_by_key.get(need.key.casefold())
+        existing = existing_by_key.get(need.key)
         if availability == "known" and existing and existing.availability == "known":
             value = merge_evidence_value(existing.value, value)
         if availability == "known":
@@ -3071,9 +8286,9 @@ def parse_gap_evidence(request: GapEvidenceParseRequest) -> GapEvidenceParseResp
             )
         )
     combined_evidence = {**existing_by_key}
-    combined_evidence.update({item.key.casefold(): item for item in evidence})
+    combined_evidence.update({canonical_evidence_key(item.key): item for item in evidence})
     any_groups: Dict[str, List[GapEvidenceNeed]] = {}
-    for need in request.evidence_needs:
+    for need in canonical_needs:
         if need.evidence_group and need.group_relation == "any":
             any_groups.setdefault(need.evidence_group, []).append(need)
     satisfied_groups = [
@@ -3082,13 +8297,13 @@ def parse_gap_evidence(request: GapEvidenceParseRequest) -> GapEvidenceParseResp
         if any(
             evidence_satisfies_need(need, combined_evidence[need.key.casefold()])
             for need in needs
-            if need.key.casefold() in combined_evidence
+            if need.key in combined_evidence
         )
     ]
     if satisfied_groups:
         group_by_key = {
-            need.key.casefold(): need.evidence_group
-            for need in request.evidence_needs
+            need.key: need.evidence_group
+            for need in canonical_needs
         }
         missing_slots = [
             slot
@@ -3096,8 +8311,8 @@ def parse_gap_evidence(request: GapEvidenceParseRequest) -> GapEvidenceParseResp
             if group_by_key.get(
                 next(
                     (
-                        need.key.casefold()
-                        for need in request.evidence_needs
+                        need.key
+                        for need in canonical_needs
                         if slot.startswith(f"{need.key}.")
                     ),
                     "",
@@ -3106,12 +8321,25 @@ def parse_gap_evidence(request: GapEvidenceParseRequest) -> GapEvidenceParseResp
             not in satisfied_groups
         ]
     unique_missing_slots = list(dict.fromkeys(missing_slots))
-    evidence_by_key = {item.key.casefold(): item for item in evidence}
+    if clarification_slots and not satisfied_groups:
+        unique_missing_slots = [
+            slot
+            for slot in unique_missing_slots
+            if not any(
+                slot.startswith(f"{need.key}.")
+                and need.key in clarification_group_keys
+                for need in canonical_needs
+            )
+        ]
+        unique_missing_slots.extend(
+            slot for slot in clarification_slots if slot not in unique_missing_slots
+        )
+    evidence_by_key = {canonical_evidence_key(item.key): item for item in evidence}
     slot_states: Dict[str, EvidenceSlotStatus] = {
         slot: "missing" for slot in unique_missing_slots
     }
-    for need in request.evidence_needs:
-        item = evidence_by_key.get(need.key.casefold())
+    for need in canonical_needs:
+        item = evidence_by_key.get(need.key)
         if item is None:
             continue
         required_fields = need.required_fields or required_fields_for_evidence_need(
@@ -3122,18 +8350,22 @@ def parse_gap_evidence(request: GapEvidenceParseRequest) -> GapEvidenceParseResp
             slot = f"{need.key}.{field}"
             if slot not in slot_states:
                 slot_states[slot] = item.availability
-    follow_up = (
-        f"还需要补充：{'、'.join(evidence_slot_label(slot) for slot in unique_missing_slots)}。"
-        "如果确实不知道或不记得，可以直接说明。"
-        if unique_missing_slots
-        else None
-    )
+    if clarification_slots and not satisfied_groups:
+        follow_up = "请确认这个数字属于 GPA（绩点）还是百分制平均分？"
+    else:
+        follow_up = (
+            f"还需要补充：{'、'.join(evidence_slot_label(slot) for slot in unique_missing_slots)}。"
+            "如果确实不知道或不记得，可以直接说明。"
+            if unique_missing_slots
+            else None
+        )
     return GapEvidenceParseResponse(
         evidence=evidence,
         missing_slots=unique_missing_slots,
         follow_up_question=follow_up,
         satisfied_evidence_groups=satisfied_groups,
         slot_states=slot_states,
+        parser_calls=1,
     )
 
 
@@ -3145,6 +8377,521 @@ async def gap_evidence_parse_endpoint(
     return parse_gap_evidence(request)
 
 
+def assign_typed_evidence_path(value: Dict[str, Any], path: str, answer: Any) -> None:
+    if path in IELTS_COMPONENT_FIELDS:
+        value.setdefault("subscores", {})[path] = answer
+    else:
+        value[path] = answer
+
+
+def structured_evidence_missing_slots(
+    needs: List[GapEvidenceNeed],
+    evidence_by_key: Dict[str, UserEvidence],
+) -> tuple[List[str], List[str]]:
+    missing_slots = []
+    groups: Dict[str, List[GapEvidenceNeed]] = {}
+    for need in needs:
+        key = canonical_evidence_key(need.key)
+        item = evidence_by_key.get(key)
+        if item is None:
+            missing_slots.extend(
+                f"{key}.{field}" for field in (need.required_fields or ["description"])
+            )
+        elif item.availability == "known":
+            missing_slots.extend(
+                f"{key}.{field}"
+                for field in missing_evidence_fields(need, item.value)
+            )
+        if need.evidence_group and need.group_relation == "any":
+            groups.setdefault(need.evidence_group, []).append(need)
+
+    satisfied_groups = []
+    for group, group_needs in groups.items():
+        academic_policy_group = all(
+            need.evidence_type == "academic_score"
+            and canonical_evidence_key(need.key).rsplit(".", 1)[-1]
+            in ACADEMIC_POLICY_KEYS
+            for need in group_needs
+        )
+        language_policy_group = all(
+            backend_language_proof(need) is not None
+            for need in group_needs
+        )
+        if academic_policy_group:
+            satisfied = any(
+                (item := evidence_by_key.get(canonical_evidence_key(need.key)))
+                is not None
+                and evidence_is_terminal_for_need(need, item)
+                for need in group_needs
+            )
+        elif language_policy_group:
+            satisfied = any(
+                evidence_is_complete_known(
+                    need,
+                    evidence_by_key.get(canonical_evidence_key(need.key)),
+                )
+                for need in group_needs
+            ) or all(
+                (item := evidence_by_key.get(canonical_evidence_key(need.key)))
+                is not None
+                and evidence_is_terminal_for_need(need, item)
+                for need in group_needs
+            )
+        else:
+            satisfied = any(
+                (item := evidence_by_key.get(canonical_evidence_key(need.key)))
+                is not None
+                and evidence_satisfies_need(need, item)
+                for need in group_needs
+            ) or all(
+                (item := evidence_by_key.get(canonical_evidence_key(need.key)))
+                is not None
+                and evidence_is_terminal_for_need(need, item)
+                for need in group_needs
+            )
+        if satisfied:
+            satisfied_groups.append(group)
+    if satisfied_groups:
+        keys_in_satisfied_groups = {
+            canonical_evidence_key(need.key)
+            for group in satisfied_groups
+            for need in groups[group]
+        }
+        missing_slots = [
+            slot
+            for slot in missing_slots
+            if not any(slot.startswith(f"{key}.") for key in keys_in_satisfied_groups)
+        ]
+    return list(dict.fromkeys(missing_slots)), satisfied_groups
+
+
+def structured_terminal_evidence_keys(
+    question: GapPlannerQuestion,
+    expected_keys: Set[str],
+) -> Set[str]:
+    """Limit a terminal action to the evidence branches rendered by the control."""
+    bound_keys = {
+        canonical_evidence_key(field.evidence_key)
+        for field in question.fields
+    }
+    bound_keys.update(
+        canonical_evidence_key(option.evidence_key)
+        for option in question.options
+        if option.evidence_key
+    )
+    return expected_keys.intersection(bound_keys) or expected_keys
+
+
+def submit_structured_evidence(
+    request: GapStructuredEvidenceRequest,
+) -> GapEvidenceParseResponse:
+    question = request.question
+    if question.control_type == "text_fallback":
+        raise HTTPException(
+            status_code=422,
+            detail="text_fallback answers must use the free-text parser endpoint",
+        )
+    needs = [
+        need.model_copy(update={"key": canonical_evidence_key(need.key)})
+        for need in request.evidence_needs
+    ]
+    need_by_key = {need.key: need for need in needs}
+    expected_keys = {
+        canonical_evidence_key(key) for key in question.expected_evidence_keys
+    }
+    allowed_keys = {
+        canonical_evidence_key(key)
+        for key in (question.allowed_evidence_keys or question.expected_evidence_keys)
+    }
+    controller_bindings_by_key = {
+        canonical_evidence_key(binding.evidence_key): binding
+        for binding in question.conditional_controller_bindings
+    }
+    if (
+        not expected_keys
+        or not expected_keys.issubset(allowed_keys)
+        or not allowed_keys.issubset(need_by_key)
+        or any(
+            canonical_evidence_key(binding.evidence_key) not in allowed_keys
+            for binding in question.conditional_controller_bindings
+        )
+    ):
+        logger.warning(
+            "structured_evidence_contract_invalid question_id=%s expected=%s allowed=%s needs=%s",
+            question.question_id,
+            sorted(expected_keys),
+            sorted(allowed_keys),
+            sorted(need_by_key),
+        )
+        raise HTTPException(status_code=422, detail="structured_question_unavailable")
+
+    now = datetime.now(timezone.utc).isoformat()
+    submitted: Dict[str, UserEvidence] = {}
+    if request.answer.terminal_state:
+        if (
+            request.answer.terminal_state == "unknown"
+            and not question.allow_unknown
+        ):
+            raise HTTPException(status_code=422, detail="unknown is not allowed for this question")
+        if (
+            request.answer.terminal_state == "known_negative"
+            and not question.allow_negative
+        ):
+            raise HTTPException(status_code=422, detail="negative is not allowed for this question")
+        for key in structured_terminal_evidence_keys(question, expected_keys):
+            need = need_by_key[key]
+            raw = "不知道" if request.answer.terminal_state == "unknown" else "暂时没有"
+            submitted[key] = UserEvidence(
+                evidence_type=need.evidence_type,
+                key=key,
+                value=None,
+                raw_answer=raw,
+                availability=request.answer.terminal_state,
+                updated_at=now,
+            )
+    elif question.control_type == "experience_form":
+        option_by_value = {option.value: option for option in question.options}
+        selected_values = list(dict.fromkeys(request.answer.selected_options))
+        if any(value not in option_by_value for value in selected_values):
+            raise HTTPException(status_code=422, detail="selected option is invalid")
+        selected_types = [
+            value.split(":", 1)[1]
+            for value in selected_values
+            if value.startswith("experience:") and value != "experience:none"
+        ]
+        selected_none = "experience:none" in selected_values
+        if selected_none and selected_types:
+            raise HTTPException(
+                status_code=422,
+                detail="no experience cannot be combined with experience types",
+            )
+        selected_units = [
+            value.split(":", 1)[1]
+            for value in selected_values
+            if value.startswith("unit:")
+        ]
+        if len(selected_units) > 1:
+            raise HTTPException(status_code=422, detail="experience unit must be unique")
+        existing = next(
+            (
+                item
+                for item in request.existing_evidence
+                if canonical_evidence_key(item.key) == "experience"
+                and item.availability == "known"
+                and isinstance(item.value, dict)
+            ),
+            None,
+        )
+        existing_value = dict(existing.value) if existing else {}
+        if selected_none:
+            value = ExperienceEvidenceValue(
+                requirement_id=question.requirement_id or "",
+                has_experience=False,
+            ).model_dump()
+            raw_answer = "没有相关经历"
+        else:
+            experience_types = selected_types or existing_value.get(
+                "experience_types", []
+            )
+            quantity = request.answer.values.get("experience-duration")
+            existing_duration = existing_value.get("duration")
+            existing_duration = (
+                existing_duration if isinstance(existing_duration, dict) else {}
+            )
+            if quantity is None:
+                quantity = existing_duration.get("quantity")
+            unit = selected_units[0] if selected_units else existing_duration.get("unit")
+            value = ExperienceEvidenceValue(
+                requirement_id=question.requirement_id or "",
+                has_experience=True,
+                experience_types=experience_types,
+                duration={"quantity": quantity, "unit": unit},
+            ).model_dump()
+            raw_answer = "；".join(
+                [
+                    *[
+                        option_by_value[selected].label
+                        for selected in selected_values
+                        if selected.startswith("experience:")
+                    ],
+                    f"累计 {quantity} {unit}",
+                ]
+            )
+        submitted["experience"] = UserEvidence(
+            evidence_type="experience",
+            key="experience",
+            value=value,
+            raw_answer=raw_answer,
+            availability="known",
+            updated_at=now,
+            source_requirement_ids=(
+                [question.requirement_id] if question.requirement_id else []
+            ),
+        )
+    elif question.control_type in {
+        "boolean", "boolean_group", "number", "number_group", "date", "short_text"
+    }:
+        value_by_key: Dict[str, Dict[str, Any]] = {}
+        display_by_key: Dict[str, List[str]] = {}
+        for field in question.fields:
+            key = canonical_evidence_key(field.evidence_key)
+            if key not in allowed_keys:
+                logger.warning(
+                    "structured_evidence_field_invalid question_id=%s field_id=%s key=%s",
+                    question.question_id,
+                    field.field_id,
+                    key,
+                )
+                raise HTTPException(status_code=422, detail="structured_question_unavailable")
+            if field.field_id not in request.answer.values:
+                continue
+            if key not in expected_keys:
+                raise HTTPException(status_code=422, detail="structured_question_unavailable")
+            answer = request.answer.values[field.field_id]
+            if question.control_type in {"boolean", "boolean_group"}:
+                if not isinstance(answer, bool):
+                    raise HTTPException(status_code=422, detail="boolean answer must be true or false")
+                need = need_by_key[key]
+                if question.control_type == "boolean_group":
+                    if need.evidence_type == "material_status":
+                        value = MaterialItemEvidenceValue(
+                            requirement_id=question.requirement_id or "",
+                            item_id=need.item_id or key.rsplit(".", 1)[-1],
+                            material_type=need.material_type,
+                            label=need.label,
+                            available=answer,
+                        ).model_dump()
+                    else:
+                        item_id = key.rsplit(".", 1)[-1]
+                        value = CourseRequirementEvidenceValue(
+                            requirement_id=question.requirement_id or "",
+                            item_id=item_id,
+                            course_name=need.label,
+                            completed=answer,
+                        ).model_dump()
+                    availability: EvidenceAvailability = "known"
+                else:
+                    if need.other_value_kind == "boolean":
+                        controller_binding = controller_bindings_by_key.get(key)
+                        if controller_binding is not None:
+                            value = ConditionalControllerEvidenceValue(
+                                requirement_id=question.requirement_id or "",
+                                item_id=need.item_id or key.rsplit(".", 1)[-1],
+                                label=need.label,
+                                matches_condition=answer,
+                                value=(
+                                    controller_binding.expected_values[0]
+                                    if answer
+                                    else None
+                                ),
+                            ).model_dump()
+                            availability = "known" if answer else "known_negative"
+                        else:
+                            value = OtherItemEvidenceValue(
+                                requirement_id=question.requirement_id or "",
+                                item_id=need.item_id or key.rsplit(".", 1)[-1],
+                                label=need.label,
+                                value_kind="boolean",
+                                value=answer,
+                            ).model_dump()
+                            availability = "known"
+                    else:
+                        value = {"status": answer}
+                        availability = "known" if answer else "known_negative"
+                submitted[key] = UserEvidence(
+                    evidence_type=need.evidence_type,
+                    key=key,
+                    value=value,
+                    raw_answer="有" if answer else "没有",
+                    availability=availability,
+                    updated_at=now,
+                    source_requirement_ids=(
+                        [question.requirement_id] if question.requirement_id else []
+                    ),
+                )
+                continue
+            if question.control_type in {"number", "number_group"}:
+                if isinstance(answer, bool) or not isinstance(answer, (int, float)):
+                    raise HTTPException(status_code=422, detail="number answer must be numeric")
+                if question.validation.minimum is not None and answer < question.validation.minimum:
+                    raise HTTPException(status_code=422, detail="number answer is below the allowed minimum")
+                if question.validation.maximum is not None and answer > question.validation.maximum:
+                    raise HTTPException(status_code=422, detail="number answer exceeds the allowed maximum")
+            elif not isinstance(answer, str) or not answer.strip():
+                raise HTTPException(status_code=422, detail="text answer must be a non-empty string")
+            value_by_key.setdefault(key, {})
+            assign_typed_evidence_path(value_by_key[key], field.value_path, answer)
+            display_by_key.setdefault(key, []).append(f"{field.label}: {answer}")
+        for key, value in value_by_key.items():
+            existing = next(
+                (
+                    item
+                    for item in request.existing_evidence
+                    if canonical_evidence_key(item.key) == key
+                    and item.availability == "known"
+                ),
+                None,
+            )
+            if existing:
+                value = merge_evidence_value(existing.value, value)
+            need = need_by_key[key]
+            if (
+                need.evidence_type == "courses"
+                and set(need.required_fields) == {"quantity"}
+                and need.unit
+            ):
+                value = CourseCreditEvidenceValue(
+                    requirement_id=question.requirement_id or "",
+                    label=need.label or "相关课程",
+                    quantity=value.get("quantity"),
+                    unit=need.unit,
+                ).model_dump()
+            elif (
+                need.evidence_type == "standardized_score"
+                and canonical_evidence_key(key) == "gre"
+            ):
+                value = GREScoreEvidenceValue.model_validate(value).model_dump(
+                    exclude_none=True
+                )
+            elif (
+                need.evidence_type == "material_quantity"
+                and need.material_type == "recommendation_letters"
+            ):
+                value = MaterialQuantityEvidenceValue(
+                    requirement_id=question.requirement_id or "",
+                    item_id=need.item_id or key.rsplit(".", 1)[-1],
+                    material_type="recommendation_letters",
+                    quantity=value.get("quantity"),
+                ).model_dump()
+            elif need.other_value_kind in {"numeric", "short_text"}:
+                actual_value = value.get(
+                    "quantity" if need.other_value_kind == "numeric" else "description"
+                )
+                value = OtherItemEvidenceValue(
+                    requirement_id=question.requirement_id or "",
+                    item_id=need.item_id or key.rsplit(".", 1)[-1],
+                    label=need.label,
+                    value_kind=need.other_value_kind,
+                    value=actual_value,
+                    options=need.other_options,
+                ).model_dump()
+            submitted[key] = UserEvidence(
+                evidence_type=need.evidence_type,
+                key=key,
+                value=value,
+                raw_answer="；".join(display_by_key[key]),
+                availability="known",
+                updated_at=now,
+                source_requirement_ids=(
+                    [question.requirement_id] if question.requirement_id else []
+                ),
+            )
+    elif question.control_type in {"single_select", "multi_select"}:
+        selected_values = list(dict.fromkeys(request.answer.selected_options))
+        if question.control_type == "single_select" and len(selected_values) != 1:
+            raise HTTPException(status_code=422, detail="single_select requires exactly one option")
+        minimum = question.validation.min_selections or (1 if question.validation.required else 0)
+        if len(selected_values) < minimum:
+            raise HTTPException(status_code=422, detail="not enough options were selected")
+        if (
+            question.validation.max_selections is not None
+            and len(selected_values) > question.validation.max_selections
+        ):
+            raise HTTPException(status_code=422, detail="too many options were selected")
+        option_by_value = {option.value: option for option in question.options}
+        if any(value not in option_by_value for value in selected_values):
+            raise HTTPException(status_code=422, detail="selected option is invalid")
+        selected_by_key: Dict[str, List[GapQuestionOption]] = {}
+        for value in selected_values:
+            option = option_by_value[value]
+            key = canonical_evidence_key(option.evidence_key or "")
+            if key not in allowed_keys or key not in expected_keys:
+                logger.warning(
+                    "structured_evidence_option_invalid question_id=%s value=%s key=%s",
+                    question.question_id,
+                    value,
+                    key,
+                )
+                raise HTTPException(status_code=422, detail="structured_question_unavailable")
+            selected_by_key.setdefault(key, []).append(option)
+        for key, options in selected_by_key.items():
+            mapped_values = [option.evidence_value for option in options]
+            if len(options) == 1 and mapped_values[0] is not None:
+                value = (
+                    mapped_values[0]
+                    if isinstance(mapped_values[0], dict)
+                    else {"description": mapped_values[0]}
+                )
+            else:
+                value = {
+                    "description": "；".join(option.label for option in options),
+                    "selected_values": [option.value for option in options],
+                }
+            need = need_by_key[key]
+            if need.other_value_kind in {"single_select", "multi_select"}:
+                selected_value: Any = (
+                    options[0].value
+                    if need.other_value_kind == "single_select"
+                    else [option.value for option in options]
+                )
+                value = OtherItemEvidenceValue(
+                    requirement_id=question.requirement_id or "",
+                    item_id=need.item_id or key.rsplit(".", 1)[-1],
+                    label=need.label,
+                    value_kind=need.other_value_kind,
+                    value=selected_value,
+                    options=need.other_options,
+                ).model_dump()
+            submitted[key] = UserEvidence(
+                evidence_type=need.evidence_type,
+                key=key,
+                value=value,
+                raw_answer="；".join(option.label for option in options),
+                availability="known",
+                updated_at=now,
+            )
+
+    existing_by_key = {
+        canonical_evidence_key(item.key): item.model_copy(
+            update={"key": canonical_evidence_key(item.key)}
+        )
+        for item in request.existing_evidence
+    }
+    combined = {**existing_by_key, **submitted}
+    missing_slots, satisfied_groups = structured_evidence_missing_slots(needs, combined)
+    slot_states: Dict[str, EvidenceSlotStatus] = {
+        slot: "missing" for slot in missing_slots
+    }
+    for need in needs:
+        item = combined.get(need.key)
+        if not item:
+            continue
+        for field in need.required_fields or ["description"]:
+            slot = f"{need.key}.{field}"
+            if slot not in slot_states:
+                slot_states[slot] = item.availability
+    return GapEvidenceParseResponse(
+        evidence=list(submitted.values()),
+        missing_slots=missing_slots,
+        follow_up_question=(
+            f"还需要补充：{'、'.join(evidence_slot_label(slot) for slot in missing_slots)}。"
+            if missing_slots
+            else None
+        ),
+        satisfied_evidence_groups=satisfied_groups,
+        slot_states=slot_states,
+        parser_calls=0,
+    )
+
+
+@app.post("/gap/evidence/submit", response_model=GapEvidenceParseResponse, tags=["gap"])
+async def gap_structured_evidence_endpoint(
+    request: GapStructuredEvidenceRequest,
+) -> GapEvidenceParseResponse:
+    """Validate and store a typed answer without natural-language parsing or LLM calls."""
+    return submit_structured_evidence(request)
+
+
 def evidence_display(item: Optional[UserEvidence]) -> str:
     if item is None:
         return "未提供"
@@ -3152,12 +8899,45 @@ def evidence_display(item: Optional[UserEvidence]) -> str:
         return item.raw_answer or "用户明确表示暂时无法提供"
     if item.availability == "known_negative":
         return item.raw_answer or "用户明确表示目前没有"
+    if canonical_evidence_key(item.key) in {"ielts", "toefl"} and isinstance(
+        item.value, dict
+    ):
+        test_name = canonical_evidence_key(item.key).upper()
+        parts = []
+        if item.value.get("score") is not None:
+            parts.append(f"{test_name} {item.value['score']:g}")
+        subscores = item.value.get("subscores") or {}
+        component_values = [
+            subscores.get(component) for component in IELTS_COMPONENT_FIELDS
+        ]
+        if all(value is not None for value in component_values):
+            if len(set(component_values)) == 1:
+                parts.append(f"四项 {component_values[0]:g}")
+            else:
+                labels = {
+                    "listening": "听力",
+                    "reading": "阅读",
+                    "writing": "写作",
+                    "speaking": "口语",
+                }
+                parts.extend(
+                    f"{labels[component]} {subscores[component]:g}"
+                    for component in IELTS_COMPONENT_FIELDS
+                )
+        if parts:
+            return " / ".join(parts)
     return item.raw_answer or str(item.value)
 
 
 def score_from_evidence(item: UserEvidence) -> tuple[Optional[float], Optional[float], Dict[str, float]]:
     if not isinstance(item.value, dict):
         return None, None, {}
+    if (
+        item.value.get("value_kind") == "numeric"
+        and isinstance(item.value.get("value"), (int, float))
+        and not isinstance(item.value.get("value"), bool)
+    ):
+        return float(item.value["value"]), None, {}
     score = item.value.get("score")
     scale = item.value.get("scale")
     subscores = item.value.get("subscores") or {}
@@ -3179,7 +8959,7 @@ def evaluate_constraint_option(
     importance: RequirementImportance,
 ) -> tuple[GapStatus, str, str, str]:
     constraint_kind = option.kind or constraint_kind
-    item = evidence_by_key.get(option.key.casefold())
+    item = evidence_by_key.get(canonical_evidence_key(option.key))
     user_text = evidence_display(item)
     if item is None or item.availability == "unknown":
         return "unknown", user_text, "需要补充信息", "当前用户证据不足。"
@@ -3188,6 +8968,24 @@ def evaluate_constraint_option(
         return status, user_text, "当前尚未具备该项", "用户明确表示目前没有该项证据。"
 
     if constraint_kind == "score":
+        if canonical_evidence_key(option.key) == "gre" and option.component:
+            component_score = (
+                item.value.get(option.component)
+                if isinstance(item.value, dict)
+                else None
+            )
+            if not isinstance(component_score, (int, float)) or option.minimum is None:
+                return "unknown", user_text, "需要可比较的 GRE 分项成绩", "GRE 分项数值不足。"
+            if component_score < option.minimum:
+                difference = round(option.minimum - float(component_score), 2)
+                status: GapStatus = "not_met" if importance == "required" else "partial"
+                return (
+                    status,
+                    user_text,
+                    f"{option.component} 还差 {difference:g}",
+                    "当前 GRE 分项成绩低于明确要求。",
+                )
+            return "met", user_text, "无", "当前 GRE 分项成绩达到明确要求。"
         score, scale, subscores = score_from_evidence(item)
         if score is None or option.minimum is None:
             return "unknown", user_text, "需要可比较的成绩", "成绩数值不足。"
@@ -3214,9 +9012,36 @@ def evaluate_constraint_option(
         return "met", user_text, "无", "当前成绩达到明确数值要求。"
 
     if constraint_kind == "material_boolean":
-        return "met", user_text, "无", "用户明确表示该材料已经具备。"
+        available = None
+        if isinstance(item.value, dict):
+            if item.value.get("value_kind") == "boolean":
+                available = item.value.get("value")
+            if available is None:
+                available = item.value.get("available")
+            if available is None:
+                available = item.value.get("status")
+            if available is None and item.value.get("description") in {
+                "有", "是", "已准备", "已具备"
+            }:
+                available = True
+        if available is None and item.raw_answer.strip() in {
+            "有", "是", "已准备", "已具备"
+        }:
+            available = True
+        if available is False:
+            status: GapStatus = "not_met" if importance == "required" else "partial"
+            return status, user_text, "当前缺少该材料", "用户明确表示目前没有该材料。"
+        if available is True:
+            return "met", user_text, "无", "用户明确表示该材料已经具备。"
+        return "unknown", user_text, "需要确认材料是否存在", "材料状态证据不可比较。"
     if constraint_kind == "material_quantity":
         quantity = item.value.get("quantity") if isinstance(item.value, dict) else None
+        if (
+            quantity is None
+            and isinstance(item.value, dict)
+            and item.value.get("value_kind") == "numeric"
+        ):
+            quantity = item.value.get("value")
         if not isinstance(quantity, (int, float)) or option.required_quantity is None:
             return "unknown", user_text, "需要明确数量", "当前数量信息不足。"
         if quantity >= option.required_quantity:
@@ -3224,9 +9049,38 @@ def evaluate_constraint_option(
         missing = option.required_quantity - float(quantity)
         status = "not_met" if quantity == 0 and importance == "required" else "partial"
         return status, user_text, f"还需 {missing:g}{option.unit or '项'}", "当前已满足一部分数量要求。"
+    if constraint_kind == "course_credit":
+        quantity = item.value.get("quantity") if isinstance(item.value, dict) else None
+        if not isinstance(quantity, (int, float)) or option.required_quantity is None:
+            return "unknown", user_text, "需要明确课程学分", "当前课程学分信息不足。"
+        if quantity >= option.required_quantity:
+            return "met", user_text, "无", "相关课程学分达到明确要求。"
+        missing = option.required_quantity - float(quantity)
+        status = "not_met" if importance == "required" else "partial"
+        return (
+            status,
+            user_text,
+            f"还差 {missing:g} {option.unit or 'credits'}",
+            "相关课程学分尚未达到明确要求。",
+        )
     if constraint_kind == "experience_duration":
-        duration = item.value.get("duration") if isinstance(item.value, dict) else None
-        unit = item.value.get("unit", "") if isinstance(item.value, dict) else ""
+        has_experience = (
+            item.value.get("has_experience")
+            if isinstance(item.value, dict)
+            else None
+        )
+        if has_experience is False:
+            status: GapStatus = "not_met" if importance == "required" else "partial"
+            return status, user_text, "当前没有相关经验", "用户明确表示目前没有相关经验。"
+        duration_value = (
+            item.value.get("duration") if isinstance(item.value, dict) else None
+        )
+        if isinstance(duration_value, dict):
+            duration = duration_value.get("quantity")
+            unit = duration_value.get("unit", "")
+        else:
+            duration = duration_value
+            unit = item.value.get("unit", "") if isinstance(item.value, dict) else ""
         if not isinstance(duration, (int, float)) or option.required_quantity is None:
             return "unknown", user_text, "需要明确经历时长", "当前时长信息不足。"
         months = float(duration) * 12 if str(unit).casefold() in {"年", "year", "years"} else float(duration)
@@ -3247,7 +9101,7 @@ def evaluate_deterministic_requirement(
     if (
         (constraint.kind in {"none", "course_credit"})
         and not any(option.kind for option in constraint.options)
-    ) or not constraint.options:
+    ) and not planned.course_requirements:
         return "unknown", "未提供", "需要语义判断", "该要求需要语义证据。"
     results = [
         evaluate_constraint_option(
@@ -3258,6 +9112,53 @@ def evaluate_deterministic_requirement(
         )
         for option in constraint.options
     ]
+    for course_item in planned.course_requirements:
+        item_key = course_requirement_evidence_key(course_item.item_id)
+        evidence = evidence_by_key.get(item_key)
+        user_text = evidence_display(evidence)
+        completed = (
+            evidence.value.get("completed")
+            if evidence and isinstance(evidence.value, dict)
+            else None
+        )
+        if not isinstance(completed, bool):
+            results.append(
+                ("unknown", user_text, f"需确认 {course_item.course_name}", "缺少该必修课程的确认信息。")
+            )
+        elif completed:
+            results.append(("met", user_text, "无", f"用户确认已修读 {course_item.course_name}。"))
+        else:
+            status: GapStatus = "not_met" if planned.importance == "required" else "partial"
+            results.append(
+                (status, user_text, f"缺少 {course_item.course_name}", "用户确认尚未修读该课程。")
+            )
+        if course_item.minimum_credits is not None and course_item.unit:
+            credit_key = course_requirement_credit_evidence_key(course_item.item_id)
+            credit_evidence = evidence_by_key.get(credit_key)
+            quantity = (
+                credit_evidence.value.get("quantity")
+                if credit_evidence and isinstance(credit_evidence.value, dict)
+                else None
+            )
+            credit_text = evidence_display(credit_evidence)
+            if not isinstance(quantity, (int, float)):
+                results.append(
+                    ("unknown", credit_text, f"需确认 {course_item.course_name} 学分", "缺少该课程的学分信息。")
+                )
+            elif quantity >= course_item.minimum_credits:
+                results.append(("met", credit_text, "无", "该课程学分达到明确要求。"))
+            else:
+                status = "not_met" if planned.importance == "required" else "partial"
+                results.append(
+                    (
+                        status,
+                        credit_text,
+                        f"{course_item.course_name} 还差 {course_item.minimum_credits - float(quantity):g} {course_item.unit}",
+                        "该课程学分尚未达到明确要求。",
+                    )
+                )
+    if not results:
+        return "unknown", "未提供", "需要语义判断", "该要求需要语义证据。"
     if constraint.relation == "any":
         met = next((item for item in results if item[0] == "met"), None)
         if met:
@@ -3331,24 +9232,121 @@ async def batch_semantic_gap_matching(
     return {item.requirement_id: item for item in output.judgements}
 
 
+def semantic_gap_task_payload(
+    planned: GapPlannedRequirement,
+    relevant_evidence: List[UserEvidence],
+) -> Dict[str, Any]:
+    return {
+        "requirement_id": planned.requirement_id,
+        "category": planned.category,
+        "requirement": planned.requirement,
+        "importance": planned.importance,
+        "user_evidence": [
+            {
+                "evidence_type": item.evidence_type,
+                "key": canonical_evidence_key(item.key),
+                "value": item.value,
+                "availability": item.availability,
+            }
+            for item in relevant_evidence
+        ],
+        "constraint": planned.constraint.model_dump(),
+        "temporal_applicability": planned.temporal_applicability,
+        "requirement_verification_status": planned.requirement_verification_status,
+    }
+
+
+def planned_evidence_complete(
+    planned: GapPlannedRequirement,
+    evidence_by_key: Dict[str, UserEvidence],
+) -> bool:
+    if not planned.evidence_needs:
+        return False
+    groups: Dict[str, List[GapEvidenceNeed]] = {}
+    for need in planned.evidence_needs:
+        groups.setdefault(need.evidence_group or planned.requirement_id, []).append(need)
+    for needs in groups.values():
+        relation = needs[0].group_relation
+        evidence_items = [
+            (need, evidence_by_key.get(canonical_evidence_key(need.key)))
+            for need in needs
+        ]
+        if relation == "any":
+            if any(
+                item is not None and evidence_satisfies_need(need, item)
+                for need, item in evidence_items
+            ):
+                continue
+            if all(
+                item is not None and evidence_is_terminal_for_need(need, item)
+                for need, item in evidence_items
+            ):
+                continue
+            return False
+        if not all(
+            item is not None and evidence_is_terminal_for_need(need, item)
+            for need, item in evidence_items
+        ):
+            return False
+    return True
+
+
+def active_gap_reason_code(status: GapStatus, evidence_complete: bool) -> GapReasonCode:
+    if status == "met":
+        return "matched"
+    if status == "partial":
+        return "partially_matched"
+    if status == "not_met":
+        return "requirement_not_met"
+    return (
+        "semantic_evidence_insufficient"
+        if evidence_complete
+        else "user_evidence_missing"
+    )
+
+
 async def analyze_gap(request: GapAnalysisRequest) -> GapAnalysisResponse:
     reusable = merge_reusable_evidence(request.user_profile, request.user_evidence)
-    evidence_by_key = {item.key.casefold(): item for item in reusable}
+    evidence_by_key = {canonical_evidence_key(item.key): item for item in reusable}
+    runtime_requirements = [
+        item.model_copy(
+            update={
+                "conditional_state": resolve_conditional_state(item, evidence_by_key)
+            }
+        )
+        for item in request.plan.requirements
+    ]
+    scope_legacy_material_evidence(runtime_requirements, evidence_by_key)
     semantic_tasks = []
     deterministic_results: Dict[str, tuple[GapStatus, str, str, str]] = {}
     informational = []
     temporally_blocked_ids = set()
-    for planned in request.plan.requirements:
+    conditionally_pending_ids = set()
+    conditionally_inactive_ids = set()
+    for planned in runtime_requirements:
+        if planned.route_scope == "special_internal":
+            continue
+        if planned.conditional_state == "inactive":
+            conditionally_inactive_ids.add(planned.requirement_id)
+            continue
+        if planned.conditional_state == "pending":
+            conditionally_pending_ids.add(planned.requirement_id)
+            continue
+        if not planned.user_matchable:
+            informational.append(planned)
+            continue
+        if not requirement_is_temporally_matchable(planned.temporal_applicability):
+            temporally_blocked_ids.add(planned.requirement_id)
+            if planned.match_strategy in {"deterministic", "hybrid"}:
+                deterministic_results[planned.requirement_id] = (
+                    evaluate_deterministic_requirement(planned, evidence_by_key)
+                )
+            continue
         if not planned.matchable:
-            if not requirement_is_temporally_matchable(
-                planned.temporal_applicability
-            ):
-                temporally_blocked_ids.add(planned.requirement_id)
-                continue
             informational.append(planned)
             continue
         relevant_evidence = [
-            evidence_by_key[need.key.casefold()].model_dump()
+            evidence_by_key[need.key.casefold()]
             for need in planned.evidence_needs
             if need.key.casefold() in evidence_by_key
         ]
@@ -3359,29 +9357,27 @@ async def analyze_gap(request: GapAnalysisRequest) -> GapAnalysisResponse:
             )
         if planned.match_strategy in {"semantic", "hybrid"}:
             if not relevant_evidence or all(
-                item["availability"] == "unknown" for item in relevant_evidence
+                item.availability == "unknown" for item in relevant_evidence
             ):
                 continue
-            semantic_tasks.append(
-                {
-                    "requirement_id": planned.requirement_id,
-                    "category": planned.category,
-                    "requirement": planned.requirement,
-                    "importance": planned.importance,
-                    "user_evidence": relevant_evidence,
-                    "constraint": planned.constraint.model_dump(),
-                }
-            )
+            semantic_tasks.append(semantic_gap_task_payload(planned, relevant_evidence))
 
     semantic_results = await batch_semantic_gap_matching(semantic_tasks)
     results = []
-    for planned in request.plan.requirements:
-        if planned.requirement_id in temporally_blocked_ids:
-            gap, reason = temporal_gap_explanation(
-                planned.temporal_applicability,
-                planned.source_cycle,
-                planned.temporal_note,
-            )
+    for planned in runtime_requirements:
+        if planned.route_scope == "special_internal":
+            continue
+        if planned.requirement_id in conditionally_inactive_ids:
+            continue
+        if planned.requirement_id in conditionally_pending_ids:
+            controlling_evidence = [
+                evidence_by_key[key]
+                for key in (
+                    canonical_evidence_key(item)
+                    for item in planned.conditional.controlling_evidence_keys
+                )
+                if key in evidence_by_key
+            ]
             results.append(
                 GapResult(
                     requirement_id=planned.requirement_id,
@@ -3393,13 +9389,84 @@ async def analyze_gap(request: GapAnalysisRequest) -> GapAnalysisResponse:
                     ),
                     importance=planned.importance,
                     status="unknown",
-                    user_evidence="未执行硬性匹配",
+                    reason_code="conditional_pending",
+                    user_evidence=(
+                        "；".join(
+                            dict.fromkeys(
+                                evidence_display(item)
+                                for item in controlling_evidence
+                            )
+                        )
+                        or "适用条件尚未确认"
+                    ),
+                    gap="适用条件待确认",
+                    reason=(
+                        "该要求是否适用尚未确定；在条件确认前不执行硬性资格判断。"
+                        + (
+                            f" 条件：{planned.conditional.condition_text}"
+                            if planned.conditional.condition_text
+                            else ""
+                        )
+                    ),
+                    source_url=planned.source_url,
+                    source_cycle=planned.source_cycle,
+                    temporal_applicability=planned.temporal_applicability,
+                    temporal_note=planned.temporal_note,
+                    conditional_state=planned.conditional_state,
+                )
+            )
+            continue
+        if planned.requirement_id in temporally_blocked_ids:
+            gap, reason = temporal_gap_explanation(
+                planned.temporal_applicability,
+                planned.source_cycle,
+                planned.temporal_note,
+            )
+            reference_evidence = [
+                evidence_by_key[need.key.casefold()]
+                for need in planned.evidence_needs
+                if need.key.casefold() in evidence_by_key
+            ]
+            reference_text = "；".join(
+                dict.fromkeys(evidence_display(item) for item in reference_evidence)
+            )
+            evidence_complete = planned_evidence_complete(planned, evidence_by_key)
+            reference_result = deterministic_results.get(planned.requirement_id)
+            if planned.temporal_applicability == "previous_cycle":
+                reason_code: GapReasonCode = "previous_cycle_reference"
+                if reference_result and reference_result[0] == "met":
+                    gap = "按上一周期参考要求已满足"
+                    reason = f"{reason} 该判断仅作上一周期参考。"
+            elif evidence_complete:
+                reason_code = "temporal_unconfirmed"
+                if reference_result and reference_result[0] == "met":
+                    gap = "按当前参考要求已满足，目标周期适用性待确认"
+                    reason = f"{reason} 当前用户证据已满足参考条件。"
+            elif planned.temporal_applicability == "not_yet_published":
+                reason_code = "temporal_unconfirmed"
+            else:
+                reason_code = "user_evidence_missing"
+                gap = "需要补充用户证据；目标周期适用性亦待确认"
+            results.append(
+                GapResult(
+                    requirement_id=planned.requirement_id,
+                    category=planned.category,
+                    requirement=planned.requirement,
+                    requirement_zh=planned.requirement_zh,
+                    requirement_verification_status=(
+                        planned.requirement_verification_status
+                    ),
+                    importance=planned.importance,
+                    status="unknown",
+                    reason_code=reason_code,
+                    user_evidence=reference_text or "未执行硬性匹配",
                     gap=gap,
                     reason=reason,
                     source_url=planned.source_url,
                     source_cycle=planned.source_cycle,
                     temporal_applicability=planned.temporal_applicability,
                     temporal_note=planned.temporal_note,
+                    conditional_state=planned.conditional_state,
                 )
             )
             continue
@@ -3465,6 +9532,10 @@ async def analyze_gap(request: GapAnalysisRequest) -> GapAnalysisResponse:
                 requirement_verification_status=planned.requirement_verification_status,
                 importance=planned.importance,
                 status=status,
+                reason_code=active_gap_reason_code(
+                    status,
+                    planned_evidence_complete(planned, evidence_by_key),
+                ),
                 user_evidence=user_text,
                 gap=gap,
                 reason=reason,
@@ -3472,6 +9543,7 @@ async def analyze_gap(request: GapAnalysisRequest) -> GapAnalysisResponse:
                 source_cycle=planned.source_cycle,
                 temporal_applicability=planned.temporal_applicability,
                 temporal_note=planned.temporal_note,
+                conditional_state=planned.conditional_state,
             )
         )
     return GapAnalysisResponse(
@@ -3548,6 +9620,11 @@ def planning_ready_by(deadline: date, today: date) -> date:
 def conditional_requirement_unconfirmed(gap: GapResult) -> bool:
     if gap.status != "unknown":
         return False
+    if (
+        gap.conditional_state == "pending"
+        or gap.reason_code == "conditional_pending"
+    ):
+        return True
     text = f"{gap.requirement} {gap.requirement_zh or ''}".casefold()
     return bool(
         re.search(

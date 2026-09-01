@@ -26,6 +26,7 @@ from app.main import (  # noqa: E402
     RequirementItem,
     TargetProgram,
     TargetProgramRequirementsReview,
+    UserEvidence,
     UserProfile,
     evaluate_deterministic_requirement,
     parse_gap_evidence,
@@ -146,6 +147,200 @@ def check_satisfied_alternative_stops_follow_up() -> None:
     assert [item.key for item in result.evidence] == ["ielts"]
 
 
+def check_academic_alternative_stops_follow_up() -> None:
+    group = "academic:0:alternatives"
+    needs = [
+        GapEvidenceNeed(
+            key="academic.degree_classification",
+            evidence_type="generic",
+            label="学位等级",
+            required_fields=["description"],
+            evidence_group=group,
+            group_relation="any",
+        ),
+        GapEvidenceNeed(
+            key="gpa",
+            evidence_type="academic_score",
+            label="GPA",
+            required_fields=["score", "scale"],
+            evidence_group=group,
+            group_relation="any",
+            minimum=3.5,
+        ),
+    ]
+    result = parse_gap_evidence(
+        GapEvidenceParseRequest(
+            question=GapPlannerQuestion(
+                question_id="q:academic-alternative",
+                question="请提供你的学位等级（或 GPA）。",
+                evidence_keys=[need.key for need in needs],
+            ),
+            evidence_needs=needs,
+            answer="二等一学位",
+        )
+    )
+    assert not result.missing_slots
+    assert result.follow_up_question is None
+    assert result.satisfied_evidence_groups == [group]
+    assert len(result.evidence) == 1
+    assert result.evidence[0].key == "academic.degree_classification"
+    assert result.evidence[0].availability == "known"
+
+
+def check_academic_any_group_contextual_parsing() -> None:
+    group = "academic:contextual:alternatives"
+    needs = [
+        GapEvidenceNeed(
+            key="degree_classification",
+            evidence_type="generic",
+            label="学位等级",
+            required_fields=["description"],
+            evidence_group=group,
+            group_relation="any",
+        ),
+        GapEvidenceNeed(
+            key="gpa",
+            evidence_type="academic_score",
+            label="GPA",
+            required_fields=["score"],
+            evidence_group=group,
+            group_relation="any",
+        ),
+        GapEvidenceNeed(
+            key="average_score",
+            evidence_type="academic_score",
+            label="平均分",
+            required_fields=["score"],
+            evidence_group=group,
+            group_relation="any",
+        ),
+    ]
+    question = GapPlannerQuestion(
+        question_id="q:academic-contextual",
+        question="请问您的学位等级或 GPA/平均分是多少？",
+        evidence_keys=[need.key for need in needs],
+    )
+
+    for answer in ("二等二", "First Class", "2:1"):
+        result = parse_gap_evidence(
+            GapEvidenceParseRequest(
+                question=question,
+                evidence_needs=needs,
+                answer=answer,
+            )
+        )
+        assert not result.missing_slots
+        assert result.follow_up_question is None
+        assert result.satisfied_evidence_groups == [group]
+        assert len(result.evidence) == 1
+        assert result.evidence[0].key == "degree_classification"
+        assert result.evidence[0].availability == "known"
+        assert result.evidence[0].value == {"description": answer}
+
+    for answer in ("87分", "平均分87", "均分87"):
+        result = parse_gap_evidence(
+            GapEvidenceParseRequest(
+                question=question,
+                evidence_needs=needs,
+                answer=answer,
+            )
+        )
+        assert not result.missing_slots
+        assert result.satisfied_evidence_groups == [group]
+        assert len(result.evidence) == 1
+        assert result.evidence[0].key == "average_score"
+        assert result.evidence[0].availability == "known"
+        assert result.evidence[0].value == {"score": 87.0}
+
+    gpa = parse_gap_evidence(
+        GapEvidenceParseRequest(
+            question=question,
+            evidence_needs=needs,
+            answer="GPA 3.7",
+        )
+    )
+    assert not gpa.missing_slots
+    assert gpa.satisfied_evidence_groups == [group]
+    assert len(gpa.evidence) == 1
+    assert gpa.evidence[0].key == "gpa"
+    assert gpa.evidence[0].value == {"score": 3.7}
+
+    ambiguous = parse_gap_evidence(
+        GapEvidenceParseRequest(
+            question=question,
+            evidence_needs=needs,
+            answer="4",
+        )
+    )
+    assert not ambiguous.evidence
+    assert ambiguous.missing_slots == ["gpa.score", "average_score.score"]
+    assert ambiguous.follow_up_question == "请确认这个数字属于 GPA（绩点）还是百分制平均分？"
+    assert ambiguous.slot_states == {
+        "gpa.score": "missing",
+        "average_score.score": "missing",
+    }
+
+    existing = UserEvidence(
+        evidence_type="generic",
+        key="degree_classification",
+        value={"description": "二等二"},
+        raw_answer="二等二",
+        availability="known",
+        updated_at="2026-08-30T00:00:00+00:00",
+    )
+    already_satisfied = parse_gap_evidence(
+        GapEvidenceParseRequest(
+            question=question,
+            evidence_needs=needs,
+            answer="4",
+            existing_evidence=[existing],
+        )
+    )
+    assert not already_satisfied.missing_slots
+    assert already_satisfied.follow_up_question is None
+    assert already_satisfied.satisfied_evidence_groups == [group]
+
+
+def check_compound_numeric_and_experience_answer() -> None:
+    needs = [
+        GapEvidenceNeed(
+            key="gpa",
+            evidence_type="academic_score",
+            label="GPA 分制",
+            required_fields=["scale"],
+        ),
+        GapEvidenceNeed(
+            key="experience",
+            evidence_type="experience",
+            label="相关经历",
+            required_fields=["description"],
+        ),
+    ]
+    question = GapPlannerQuestion(
+        question_id="q:gpa-scale-experience",
+        question="请补充 GPA 总分和相关经历。",
+        evidence_keys=[need.key for need in needs],
+    )
+    for answer in ("4，没相关经验", "总分4，无相关经验"):
+        result = parse_gap_evidence(
+            GapEvidenceParseRequest(
+                question=question,
+                evidence_needs=needs,
+                answer=answer,
+            )
+        )
+        assert not result.missing_slots
+        assert result.follow_up_question is None
+        evidence = {item.key: item for item in result.evidence}
+        assert evidence["gpa"].availability == "known"
+        assert evidence["gpa"].value == {"scale": 4.0}
+        assert evidence["experience"].availability == "known_negative"
+        assert result.slot_states == {
+            "gpa.scale": "known",
+            "experience.description": "known_negative",
+        }
+
+
 def check_negative_missing_alternative_is_terminal() -> None:
     for answer in ("没有", "暂时没有"):
         result = parse_gap_evidence(
@@ -257,6 +452,34 @@ def check_one_education_field_only() -> None:
     }
     assert result.follow_up_question and "本科专业" in result.follow_up_question
     assert "本科院校" not in result.follow_up_question
+
+
+def check_single_major_short_answer_converges() -> None:
+    result = parse_gap_evidence(
+        GapEvidenceParseRequest(
+            question=GapPlannerQuestion(
+                question_id="q:education-major",
+                question="本科专业是什么？",
+                evidence_keys=["education.major"],
+            ),
+            evidence_needs=[
+                GapEvidenceNeed(
+                    key="education.major",
+                    evidence_type="education_major",
+                    label="本科专业",
+                    required_fields=["description"],
+                )
+            ],
+            answer="数学",
+        )
+    )
+    assert not result.missing_slots
+    assert result.follow_up_question is None
+    assert len(result.evidence) == 1
+    assert result.evidence[0].key == "education.major"
+    assert result.evidence[0].availability == "known"
+    assert result.evidence[0].value == "数学"
+    assert result.slot_states == {"education.major.description": "known"}
 
 
 def check_explicit_unknown_education() -> None:
@@ -433,17 +656,77 @@ async def check_profile_education_is_reused() -> None:
     assert not plan.questions
 
 
+def check_ielts_collective_subscores_converge() -> None:
+    need = GapEvidenceNeed(
+        key="language.ielts",
+        evidence_type="language_score",
+        label="IELTS",
+        required_fields=["score", "listening", "reading", "writing", "speaking"],
+        minimum=7.5,
+        component_minimum=7.0,
+    )
+    first = parse_gap_evidence(
+        GapEvidenceParseRequest(
+            question=GapPlannerQuestion(
+                question_id="q:ielts",
+                question="请提供 IELTS 成绩。",
+                evidence_keys=["language.ielts"],
+            ),
+            evidence_needs=[need],
+            answer="雅思7.5",
+        )
+    )
+    assert first.evidence[0].key == "ielts"
+    assert first.evidence[0].value == {"score": 7.5}
+    assert first.missing_slots == [
+        "ielts.listening",
+        "ielts.reading",
+        "ielts.writing",
+        "ielts.speaking",
+    ]
+
+    for answer in ("都是7.5", "全部7.5", "四项都是7.5"):
+        completed = parse_gap_evidence(
+            GapEvidenceParseRequest(
+                question=GapPlannerQuestion(
+                    question_id="q:ielts:components",
+                    question=first.follow_up_question or "请补充四项小分。",
+                    evidence_keys=["ielts"],
+                ),
+                evidence_needs=[need],
+                existing_evidence=first.evidence,
+                answer=answer,
+            )
+        )
+        assert completed.missing_slots == []
+        assert completed.follow_up_question is None
+        assert completed.evidence[0].value == {
+            "score": 7.5,
+            "subscores": {
+                "listening": 7.5,
+                "reading": 7.5,
+                "writing": 7.5,
+                "speaking": 7.5,
+            },
+        }
+
+
 def main() -> None:
     check_ielts_missing_listening_requires_follow_up()
     check_compound_material_answer()
     check_satisfied_alternative_stops_follow_up()
+    check_academic_alternative_stops_follow_up()
+    check_academic_any_group_contextual_parsing()
+    check_compound_numeric_and_experience_answer()
     check_negative_missing_alternative_is_terminal()
     check_all_alternatives_negative_reaches_not_met()
     check_education_pure_value_answers()
     check_one_education_field_only()
+    check_single_major_short_answer_converges()
     check_explicit_unknown_education()
     check_core_005_course_slots_converge()
     check_course_slots_keep_independent_terminal_states()
+    check_ielts_collective_subscores_converge()
     asyncio.run(check_profile_education_is_reused())
     print("adaptive evidence completeness regressions: all checks passed")
 
