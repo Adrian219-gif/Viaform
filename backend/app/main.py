@@ -9,6 +9,7 @@ import os
 import re
 import socket
 import sqlite3
+import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from functools import partial
@@ -86,6 +87,11 @@ class Experience(BaseModel):
     projects: List[str] = Field(default_factory=list)
     research: List[str] = Field(default_factory=list)
     internship: List[str] = Field(default_factory=list)
+    work: List[str] = Field(default_factory=list)
+    project_status: Optional[Literal["has_value", "none", "unknown"]] = None
+    research_status: Optional[Literal["has_value", "none", "unknown"]] = None
+    internship_status: Optional[Literal["has_value", "none", "unknown"]] = None
+    work_status: Optional[Literal["has_value", "none", "unknown"]] = None
 
 
 FieldInformationState = Literal["known", "unavailable", "missing"]
@@ -94,11 +100,33 @@ FieldInformationState = Literal["known", "unavailable", "missing"]
 class Language(BaseModel):
     IELTS: Optional[float] = None
     TOEFL: Optional[float] = None
+    IELTS_status: Optional[Literal["has_value", "none", "unknown"]] = None
+    TOEFL_status: Optional[Literal["has_value", "none", "unknown"]] = None
+    IELTS_subscores: Dict[str, Optional[float]] = Field(
+        default_factory=lambda: {
+            "listening": None, "reading": None, "writing": None, "speaking": None,
+        }
+    )
+    TOEFL_subscores: Dict[str, Optional[float]] = Field(
+        default_factory=lambda: {
+            "reading": None, "listening": None, "speaking": None, "writing": None,
+        }
+    )
 
 
 class StandardizedTest(BaseModel):
     GRE: Optional[float] = None
     GMAT: Optional[float] = None
+    GRE_status: Optional[Literal["has_value", "none", "unknown"]] = None
+    GMAT_status: Optional[Literal["has_value", "none", "unknown"]] = None
+
+
+class ApplicationMaterials(BaseModel):
+    cv_status: Optional[Literal["prepared", "not_prepared", "unknown", "not_applicable"]] = None
+    transcript_status: Optional[Literal["prepared", "not_prepared", "unknown", "not_applicable"]] = None
+    motivation_letter_status: Optional[Literal["prepared", "not_prepared", "unknown", "not_applicable"]] = None
+    portfolio_status: Optional[Literal["prepared", "not_prepared", "unknown", "not_applicable"]] = None
+    confirmed_recommenders: Optional[int] = Field(default=None, ge=0)
 
 
 class UserProfile(BaseModel):
@@ -106,6 +134,7 @@ class UserProfile(BaseModel):
     experience: Experience = Field(default_factory=Experience)
     language: Language = Field(default_factory=Language)
     standardized_test: StandardizedTest = Field(default_factory=StandardizedTest)
+    materials: ApplicationMaterials = Field(default_factory=ApplicationMaterials)
 
 
 TopicName = Literal[
@@ -391,6 +420,8 @@ GapEvidenceType = Literal[
     "material_status",
     "material_quantity",
     "experience",
+    "prerequisite_course",
+    "user_course",
     "generic",
 ]
 EvidenceValueKind = Literal["categorical", "numeric", "boolean", "text", "date"]
@@ -1018,6 +1049,131 @@ class GapPlanRequest(BaseModel):
     requirements_review: TargetProgramRequirementsReview
     user_profile: UserProfile = Field(default_factory=UserProfile)
     user_evidence: List[UserEvidence] = Field(default_factory=list)
+
+
+SpecialPrerequisiteRelation = Literal["all_of", "one_of"]
+SpecialExpectedAnswerType = Literal["ternary"]
+
+
+class SpecialPrerequisiteCourseExtraction(BaseModel):
+    prerequisite_kind: Literal["concrete_course", "course_category"]
+    canonical_label: Optional[str] = None
+    category_label: Optional[str] = None
+    minimum_courses: Optional[int] = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def validate_kind_shape(self) -> "SpecialPrerequisiteCourseExtraction":
+        if self.prerequisite_kind == "concrete_course":
+            if not self.canonical_label or not self.canonical_label.strip():
+                raise ValueError("concrete_course requires canonical_label")
+            self.canonical_label = self.canonical_label.strip()
+            self.category_label = None
+            self.minimum_courses = None
+        else:
+            if not self.category_label or not self.category_label.strip():
+                raise ValueError("course_category requires category_label")
+            self.category_label = self.category_label.strip()
+            self.canonical_label = None
+        return self
+
+
+class SpecialPrerequisiteGroupExtraction(BaseModel):
+    requirement_id: str = Field(min_length=1)
+    relation: SpecialPrerequisiteRelation
+    courses: List[SpecialPrerequisiteCourseExtraction] = Field(min_length=1)
+
+
+class SpecialObjectiveRequirementExtraction(BaseModel):
+    requirement_id: str = Field(min_length=1)
+    canonical_label: str = Field(min_length=1)
+    special_type: str = Field(min_length=1)
+    expected_answer_type: SpecialExpectedAnswerType = "ternary"
+
+
+class SpecialTargetedExtractionOutput(BaseModel):
+    prerequisite_groups: List[SpecialPrerequisiteGroupExtraction] = Field(
+        default_factory=list
+    )
+    objective_special_requirements: List[SpecialObjectiveRequirementExtraction] = Field(
+        default_factory=list
+    )
+
+
+class SpecialInterviewCourseItem(BaseModel):
+    prerequisite_kind: Literal["concrete_course", "course_category"]
+    canonical_label: Optional[str] = None
+    category_label: Optional[str] = None
+    minimum_courses: Optional[int] = None
+    evidence_key: str
+    suggested_user_courses: List[str] = Field(default_factory=list)
+
+
+class SpecialInterviewSource(BaseModel):
+    requirement_id: str
+    requirement: str
+    requirement_zh: Optional[str] = None
+    source_url: Optional[str] = None
+    verification_status: Literal["official_verified", "user_supplied"]
+
+
+class SpecialInterviewPrerequisiteGroup(BaseModel):
+    group_id: str
+    relation: SpecialPrerequisiteRelation
+    courses: List[SpecialInterviewCourseItem]
+    source: SpecialInterviewSource
+
+
+class SpecialInterviewObjectiveItem(BaseModel):
+    item_id: str
+    canonical_label: str
+    evidence_key: str
+    special_type: str
+    expected_answer_type: SpecialExpectedAnswerType = "ternary"
+    source: SpecialInterviewSource
+
+
+class SpecialInterviewPlanRequest(BaseModel):
+    target_program: TargetProgram
+    requirements_review: TargetProgramRequirementsReview
+    user_evidence: List[UserEvidence] = Field(default_factory=list)
+
+
+class SpecialInterviewPlan(BaseModel):
+    target_program: TargetProgram
+    prerequisite_groups: List[SpecialInterviewPrerequisiteGroup] = Field(
+        default_factory=list
+    )
+    objective_special_requirements: List[SpecialInterviewObjectiveItem] = Field(
+        default_factory=list
+    )
+    reusable_evidence: List[UserEvidence] = Field(default_factory=list)
+    trusted_requirement_count: int = 0
+    extracted_item_count: int = 0
+    remaining_item_count: int = 0
+    extraction_llm_requests: int = 0
+
+
+class SpecialInterviewAnswer(BaseModel):
+    evidence_key: str = Field(min_length=1)
+    canonical_label: str = Field(min_length=1)
+    item_type: Literal["prerequisite_course", "objective_special"]
+    prerequisite_kind: Optional[Literal["concrete_course", "course_category"]] = None
+    minimum_courses: Optional[int] = Field(default=None, ge=1)
+    availability: EvidenceAvailability
+    requirement_id: str = Field(min_length=1)
+    user_course_name: Optional[str] = None
+    user_course_names: List[str] = Field(default_factory=list)
+
+
+class SpecialInterviewEvidenceSubmitRequest(BaseModel):
+    target_program: TargetProgram
+    answers: List[SpecialInterviewAnswer] = Field(min_length=1)
+
+
+class SpecialInterviewEvidenceSubmitResponse(BaseModel):
+    evidence: List[UserEvidence]
+    parser_calls: Literal[0] = 0
+    llm_requests: Literal[0] = 0
 
 
 class GapQuestionRepairRequest(BaseModel):
@@ -6279,6 +6435,432 @@ async def repair_gap_questions_once(
             continue
         result.append(candidate.model_copy(update={"repair_attempts": 1}))
     return result, 1
+
+
+def trusted_reviewed_requirements(
+    review: TargetProgramRequirementsReview,
+) -> List[Dict[str, Any]]:
+    return [
+        {
+            "requirement_id": f"{category.category}:{index}",
+            "category": category.category,
+            "requirement": requirement.requirement,
+            "requirement_zh": requirement.requirement_zh,
+            "importance": requirement.importance,
+            "source_url": requirement.source_url,
+            "verification_status": requirement.verification_status,
+        }
+        for category in review.categories
+        for index, requirement in enumerate(category.requirements)
+        if requirement.verification_status in {"official_verified", "user_supplied"}
+    ]
+
+
+def special_evidence_slug(label: str) -> str:
+    normalized = unicodedata.normalize("NFKC", label).casefold().strip()
+    slug = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
+    if slug:
+        return slug
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def special_evidence_key(item_type: str, canonical_label: str) -> str:
+    prefix = (
+        "prerequisite_course"
+        if item_type == "prerequisite_course"
+        else "objective_special"
+    )
+    return f"{prefix}:{special_evidence_slug(canonical_label)}"
+
+
+def special_course_category_context_key(
+    target_program: TargetProgram,
+    requirement_id: str,
+    category_label: str,
+) -> str:
+    identity = "\n".join(
+        [
+            target_program.university.strip().casefold(),
+            target_program.program.strip().casefold(),
+            target_program.official_program_url.strip().casefold().rstrip("/"),
+            str(target_program.intended_entry_year),
+            target_program.intended_entry_term,
+            requirement_id,
+            category_label.strip().casefold(),
+        ]
+    )
+    return f"course_category_response:{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:20]}"
+
+
+def user_course_evidence_key(course_name: str) -> str:
+    return f"user_course:{special_evidence_slug(course_name)}"
+
+
+def parse_special_targeted_extraction(content: str) -> SpecialTargetedExtractionOutput:
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as error:
+        raise HTTPException(
+            status_code=502,
+            detail="Special Requirement extraction returned malformed JSON",
+        ) from error
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="Special Requirement extraction returned an invalid payload",
+        )
+    groups: List[SpecialPrerequisiteGroupExtraction] = []
+    specials: List[SpecialObjectiveRequirementExtraction] = []
+    for raw_group in payload.get("prerequisite_groups", []):
+        try:
+            groups.append(SpecialPrerequisiteGroupExtraction.model_validate(raw_group))
+        except ValidationError as error:
+            logger.warning(
+                "special_interview_malformed_prerequisite_group dropped=true errors=%s",
+                error.error_count(),
+            )
+    for raw_item in payload.get("objective_special_requirements", []):
+        try:
+            specials.append(SpecialObjectiveRequirementExtraction.model_validate(raw_item))
+        except ValidationError as error:
+            logger.warning(
+                "special_interview_malformed_objective_item dropped=true errors=%s",
+                error.error_count(),
+            )
+    return SpecialTargetedExtractionOutput(
+        prerequisite_groups=groups,
+        objective_special_requirements=specials,
+    )
+
+
+async def extract_special_requirements_once(
+    trusted_requirements: List[Dict[str, Any]],
+) -> SpecialTargetedExtractionOutput:
+    if not trusted_requirements:
+        return SpecialTargetedExtractionOutput()
+    schema = SpecialTargetedExtractionOutput.model_json_schema()
+    compact_requirements = [
+        {
+            "requirement_id": item["requirement_id"],
+            "category": item["category"],
+            "requirement": item["requirement"],
+        }
+        for item in trusted_requirements
+    ]
+    prompt = (
+        "你是 Special Requirement targeted extractor。只处理输入中的可信 Reviewed "
+        "Requirements，不联网，不做 Gap 判断，也不生成任何 question、UI、source_text、"
+        "翻译、source_url 或用户是否满足的结论。第一轮 Standard Profile 已覆盖本科院校、"
+        "专业、学位/状态、GPA/平均分、IELTS/TOEFL、GRE/GMAT、推荐信、CV、Transcript、"
+        "SOP/Personal Statement/Motivation Letter、Portfolio 及其他标准字段；这些绝对不能"
+        "输出。只输出两类：A) Requirement 明确列出的 prerequisite course groups；"
+        "B) 第一轮未覆盖、官网明确提出、用户可回答客观事实的少量 special requirements。"
+        "课程 group relation 只能是 all_of 或 one_of，并严格保留 AND/OR。每个 prerequisite "
+        "item 必须输出 prerequisite_kind。明确的具体课程（如 Linear Algebra）输出 "
+        "concrete_course + canonical_label；项目定义的课程类别（如 one from the available "
+        "Systems courses）输出 course_category + category_label=Systems，绝不能把整句话当作"
+        "课程名。只有 Requirement 明确写出数量时才输出 minimum_courses，例如 one from=1、"
+        "at least two=2；不得猜测数量。只抽取明确必修课程/类别；example/such as/recommended "
+        "不得升级为必修，不得自行补课程。主观的 related "
+        "discipline、relevant experience、strong/suitable background 不输出。学费、deadline、"
+        "open date、intake、duration、round、行政信息不输出。objective special 的 "
+        "expected_answer_type 只允许 ternary；例如明确要求的 certificate、undergraduate "
+        "thesis 或其他客观 programme-specific prerequisite。模型只返回 requirement_id、"
+        "canonical_label、group relation、special_type、expected_answer_type。requirement_id "
+        "必须来自输入。不得判断课程等价性，不得创造官网没有的 Requirement。\n\n"
+        f"Reviewed Requirements: {json.dumps(compact_requirements, ensure_ascii=False)}\n"
+        f"Output JSON Schema: {json.dumps(schema, ensure_ascii=False)}\n"
+        "只输出完整 JSON。"
+    )
+    raw = await call_deepseek(
+        messages=[
+            {"role": "system", "content": "只输出严格 JSON；不得调用任何工具。"},
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=4_000,
+        response_format={"type": "json_object"},
+        include_metadata=True,
+        diagnostic_label="special_requirement_targeted_extraction",
+    )
+    result = coerce_deepseek_text_result(raw)
+    if not result.content:
+        raise HTTPException(
+            status_code=502,
+            detail="Special Requirement extraction returned an empty response",
+        )
+    return parse_special_targeted_extraction(result.content)
+
+
+def build_special_interview_plan_from_extraction(
+    request: SpecialInterviewPlanRequest,
+    trusted_requirements: List[Dict[str, Any]],
+    extraction: SpecialTargetedExtractionOutput,
+    *,
+    llm_requests: int,
+) -> SpecialInterviewPlan:
+    sources = {item["requirement_id"]: item for item in trusted_requirements}
+    reusable_by_key = {
+        canonical_evidence_key(item.key): item.model_copy(
+            update={"key": canonical_evidence_key(item.key)}
+        )
+        for item in request.user_evidence
+    }
+    suggested_user_courses = [
+        str(item.value.get("course_name")).strip()
+        for key, item in reusable_by_key.items()
+        if key.startswith("user_course:")
+        and item.availability == "known"
+        and isinstance(item.value, dict)
+        and item.value.get("course_name")
+    ]
+    groups: List[SpecialInterviewPrerequisiteGroup] = []
+    seen_groups: Set[tuple[str, str, tuple[str, ...]]] = set()
+    extracted_count = 0
+    for group_index, group in enumerate(extraction.prerequisite_groups):
+        source = sources.get(group.requirement_id)
+        if source is None:
+            logger.warning(
+                "special_interview_unknown_requirement_id requirement_id=%s dropped=true",
+                group.requirement_id,
+            )
+            continue
+        courses: List[SpecialInterviewCourseItem] = []
+        seen_course_keys: Set[str] = set()
+        for course in group.courses:
+            label = course.canonical_label or course.category_label or ""
+            key = (
+                special_evidence_key("prerequisite_course", label)
+                if course.prerequisite_kind == "concrete_course"
+                else special_course_category_context_key(
+                    request.target_program,
+                    group.requirement_id,
+                    label,
+                )
+            )
+            if key in seen_course_keys:
+                continue
+            seen_course_keys.add(key)
+            courses.append(
+                SpecialInterviewCourseItem(
+                    prerequisite_kind=course.prerequisite_kind,
+                    canonical_label=course.canonical_label,
+                    category_label=course.category_label,
+                    minimum_courses=course.minimum_courses,
+                    evidence_key=key,
+                    suggested_user_courses=(
+                        suggested_user_courses
+                        if course.prerequisite_kind == "course_category"
+                        else []
+                    ),
+                )
+            )
+        signature = (
+            group.requirement_id,
+            group.relation,
+            tuple(item.evidence_key for item in courses),
+        )
+        if not courses or signature in seen_groups:
+            continue
+        seen_groups.add(signature)
+        extracted_count += len(courses)
+        if group.relation == "one_of" and any(
+            reusable_by_key.get(item.evidence_key) is not None
+            and reusable_by_key[item.evidence_key].availability == "known"
+            for item in courses
+        ):
+            continue
+        remaining_courses = [
+            item for item in courses if item.evidence_key not in reusable_by_key
+        ]
+        if not remaining_courses:
+            continue
+        groups.append(
+            SpecialInterviewPrerequisiteGroup(
+                group_id=f"special-prerequisite-{group_index}",
+                relation=group.relation,
+                courses=remaining_courses,
+                source=SpecialInterviewSource(
+                    requirement_id=group.requirement_id,
+                    requirement=source["requirement"],
+                    requirement_zh=source.get("requirement_zh"),
+                    source_url=source.get("source_url"),
+                    verification_status=source["verification_status"],
+                ),
+            )
+        )
+
+    specials: List[SpecialInterviewObjectiveItem] = []
+    seen_special_keys: Set[tuple[str, str]] = set()
+    for index, item in enumerate(extraction.objective_special_requirements):
+        source = sources.get(item.requirement_id)
+        if source is None:
+            logger.warning(
+                "special_interview_unknown_requirement_id requirement_id=%s dropped=true",
+                item.requirement_id,
+            )
+            continue
+        key = special_evidence_key("objective_special", item.canonical_label)
+        signature = (item.requirement_id, key)
+        if signature in seen_special_keys:
+            continue
+        seen_special_keys.add(signature)
+        extracted_count += 1
+        if key in reusable_by_key:
+            continue
+        specials.append(
+            SpecialInterviewObjectiveItem(
+                item_id=f"special-objective-{index}",
+                canonical_label=item.canonical_label.strip(),
+                evidence_key=key,
+                special_type=item.special_type.strip(),
+                source=SpecialInterviewSource(
+                    requirement_id=item.requirement_id,
+                    requirement=source["requirement"],
+                    requirement_zh=source.get("requirement_zh"),
+                    source_url=source.get("source_url"),
+                    verification_status=source["verification_status"],
+                ),
+            )
+        )
+    remaining_count = sum(len(group.courses) for group in groups) + len(specials)
+    return SpecialInterviewPlan(
+        target_program=request.target_program,
+        prerequisite_groups=groups,
+        objective_special_requirements=specials,
+        reusable_evidence=list(reusable_by_key.values()),
+        trusted_requirement_count=len(trusted_requirements),
+        extracted_item_count=extracted_count,
+        remaining_item_count=remaining_count,
+        extraction_llm_requests=llm_requests,
+    )
+
+
+@app.post(
+    "/special-interview/plan",
+    response_model=SpecialInterviewPlan,
+    tags=["gap"],
+)
+async def special_interview_plan_endpoint(
+    request: SpecialInterviewPlanRequest,
+) -> SpecialInterviewPlan:
+    """Extract one reusable-fact interview from trusted reviewed requirements."""
+    trusted = trusted_reviewed_requirements(request.requirements_review)
+    extraction = await extract_special_requirements_once(trusted)
+    return build_special_interview_plan_from_extraction(
+        request,
+        trusted,
+        extraction,
+        llm_requests=1 if trusted else 0,
+    )
+
+
+@app.post(
+    "/special-interview/evidence/submit",
+    response_model=SpecialInterviewEvidenceSubmitResponse,
+    tags=["gap"],
+)
+async def special_interview_evidence_submit_endpoint(
+    request: SpecialInterviewEvidenceSubmitRequest,
+) -> SpecialInterviewEvidenceSubmitResponse:
+    """Store typed special-interview facts without parsing or model calls."""
+    now = datetime.now(timezone.utc).isoformat()
+    evidence: List[UserEvidence] = []
+    for answer in request.answers:
+        if answer.item_type == "prerequisite_course" and answer.prerequisite_kind is None:
+            raise HTTPException(status_code=422, detail="Missing prerequisite kind")
+        expected_key = (
+            special_course_category_context_key(
+                request.target_program,
+                answer.requirement_id,
+                answer.canonical_label,
+            )
+            if answer.item_type == "prerequisite_course"
+            and answer.prerequisite_kind == "course_category"
+            else special_evidence_key(answer.item_type, answer.canonical_label)
+        )
+        if canonical_evidence_key(answer.evidence_key) != expected_key:
+            raise HTTPException(status_code=422, detail="Invalid special evidence key")
+        cleaned_course_names = list(
+            dict.fromkeys(
+                name.strip() for name in answer.user_course_names if name.strip()
+            )
+        )
+        if answer.user_course_name and answer.user_course_name.strip():
+            cleaned_course_names = list(
+                dict.fromkeys([answer.user_course_name.strip(), *cleaned_course_names])
+            )
+        if (
+            answer.item_type == "prerequisite_course"
+            and answer.prerequisite_kind == "course_category"
+            and answer.availability == "known"
+            and len(cleaned_course_names) < (answer.minimum_courses or 1)
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Known course category requires the user's actual course names",
+            )
+        value: Dict[str, Any] = {"canonical_label": answer.canonical_label.strip()}
+        if answer.item_type == "prerequisite_course":
+            value.update(
+                {
+                    "prerequisite_kind": answer.prerequisite_kind,
+                    "user_course_name": (
+                        answer.user_course_name.strip()
+                        if answer.user_course_name
+                        and answer.prerequisite_kind == "concrete_course"
+                        else None
+                    ),
+                    "category_label": (
+                        answer.canonical_label.strip()
+                        if answer.prerequisite_kind == "course_category"
+                        else None
+                    ),
+                    "minimum_courses": answer.minimum_courses,
+                    "matched_user_courses": (
+                        cleaned_course_names
+                        if answer.prerequisite_kind == "course_category"
+                        else []
+                    ),
+                    "reusable": answer.prerequisite_kind == "concrete_course",
+                }
+            )
+        evidence.append(
+            UserEvidence(
+                evidence_type=(
+                    "prerequisite_course"
+                    if answer.item_type == "prerequisite_course"
+                    else "generic"
+                ),
+                key=expected_key,
+                value=value,
+                raw_answer={
+                    "known": "修过" if answer.item_type == "prerequisite_course" else "持有/符合",
+                    "known_negative": "没修过" if answer.item_type == "prerequisite_course" else "没有",
+                    "unknown": "不确定",
+                }[answer.availability],
+                availability=answer.availability,
+                updated_at=now,
+                source_requirement_ids=[answer.requirement_id],
+            )
+        )
+        if (
+            answer.item_type == "prerequisite_course"
+            and answer.prerequisite_kind == "course_category"
+            and answer.availability == "known"
+        ):
+            evidence.extend(
+                UserEvidence(
+                    evidence_type="user_course",
+                    key=user_course_evidence_key(course_name),
+                    value={"course_name": course_name},
+                    raw_answer=course_name,
+                    availability="known",
+                    updated_at=now,
+                    source_requirement_ids=[answer.requirement_id],
+                )
+                for course_name in cleaned_course_names
+            )
+    return SpecialInterviewEvidenceSubmitResponse(evidence=evidence)
 
 
 async def build_gap_plan(request: GapPlanRequest) -> GapPlan:

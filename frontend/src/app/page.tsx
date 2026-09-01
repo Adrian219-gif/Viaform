@@ -1,23 +1,15 @@
 "use client";
 
-import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import styles from "./page.module.css";
+import StandardProfileInterview from "@/features/standard-profile/StandardProfileInterview";
+import { EMPTY_STANDARD_PROFILE, StandardUserProfile } from "@/features/standard-profile/profile";
+import { CachedProfileStatus, profileEntryView as profileEntryViewForStatus, readStandardProfileCache, writeStandardProfileCache } from "@/features/standard-profile/profile-cache";
+import SpecialRequirementInterview, { SpecialInterviewPlan, SpecialInterviewSubmission } from "@/features/special-interview/SpecialRequirementInterview";
+import { mergeReusableEvidence, readReusableEvidence, writeReusableEvidence } from "@/features/special-interview/evidence-cache";
 
-const topics = [
-  { id: "university", label: "本科院校", question: "你的本科院校是？", hint: "例如：中山大学" },
-  { id: "major", label: "本科专业", question: "你的本科专业是？", hint: "例如：软件工程" },
-] as const;
-
-type TopicId = typeof topics[number]["id"];
-type Answer = { topic: TopicId; question: string; answer: string };
 type ProfileStatus = "not_started" | "completed" | "skipped";
-type ScoreWithScale = { value: number | null; scale: number | null };
-type UserProfile = {
-  education: { university: string; major: string; gpa: ScoreWithScale | null; average_score: ScoreWithScale | null; courses: string[] };
-  experience: { projects: string[]; research: string[]; internship: string[] };
-  language: { IELTS: number | null; TOEFL: number | null };
-  standardized_test: { GRE: number | null; GMAT: number | null };
-};
+type UserProfile = StandardUserProfile;
 type ExploreTarget = {
   mode: "explore";
   countries: string[];
@@ -80,7 +72,7 @@ type EvidenceAvailability = "known" | "known_negative" | "unknown";
 type GapStatus = "met" | "partial" | "not_met" | "unknown";
 type GapReasonCode = "matched" | "partially_matched" | "requirement_not_met" | "user_evidence_missing" | "temporal_unconfirmed" | "previous_cycle_reference" | "semantic_evidence_insufficient" | "conditional_pending";
 type ConditionalApplicabilityState = "not_conditional" | "active" | "inactive" | "pending";
-type GapEvidenceType = "education_university" | "education_major" | "academic_score" | "language_score" | "standardized_score" | "courses" | "material_status" | "material_quantity" | "experience" | "generic";
+type GapEvidenceType = "education_university" | "education_major" | "academic_score" | "language_score" | "standardized_score" | "courses" | "material_status" | "material_quantity" | "experience" | "prerequisite_course" | "user_course" | "generic";
 type UserEvidence = { evidence_type: GapEvidenceType; key: string; value: unknown; raw_answer: string; availability: EvidenceAvailability; updated_at: string; source_requirement_ids: string[] };
 type GapEvidenceNeed = { key: string; evidence_type: GapEvidenceType; label: string; already_known: boolean; required_fields: string[]; evidence_group: string | null; group_relation: "all" | "any"; minimum: number | null; component_minimum: number | null; required_quantity: number | null };
 type GapQuestionControlType = "boolean" | "boolean_group" | "experience_form" | "single_select" | "multi_select" | "number" | "number_group" | "date" | "short_text" | "text_fallback";
@@ -236,12 +228,7 @@ function gapStatusLabel(result: GapResult): string {
   return UNKNOWN_GAP_REASON_LABELS[result.reason_code] ?? "信息不足";
 }
 
-const EMPTY_PROFILE: UserProfile = {
-  education: { university: "", major: "", gpa: null, average_score: null, courses: [] },
-  experience: { projects: [], research: [], internship: [] },
-  language: { IELTS: null, TOEFL: null },
-  standardized_test: { GRE: null, GMAT: null },
-};
+const EMPTY_PROFILE: UserProfile = EMPTY_STANDARD_PROFILE;
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const DEFAULT_ENTRY_YEAR = new Date().getUTCFullYear() + 1;
 const TARGET_CONFIRMATION_TIMEOUT_MS = 35_000;
@@ -279,16 +266,12 @@ function OverallRankingValue({ university }: { university: CandidateUniversity }
 }
 
 export default function Home() {
-  const [turns, setTurns] = useState<Answer[]>([]);
   const [profile, setProfile] = useState<UserProfile>(EMPTY_PROFILE);
-  const [topicIndex, setTopicIndex] = useState(0);
-  const [currentQuestion, setCurrentQuestion] = useState<string>(topics[0].question);
-  const [input, setInput] = useState("");
-  const [isProcessing, setIsProcessing] = useState(false);
+  const [profileHydrated, setProfileHydrated] = useState(false);
+  const [profileEntryView, setProfileEntryView] = useState<"interview" | "summary" | "incomplete">("interview");
   const [showProfile, setShowProfile] = useState(false);
   const [profileStatus, setProfileStatus] = useState<ProfileStatus>("not_started");
-  const [errorMessage, setErrorMessage] = useState("");
-  const [targetStep, setTargetStep] = useState<"explore" | "entry_cycle" | "requirements" | "gap_interview" | "gap_results" | "planning" | null>(null);
+  const [targetStep, setTargetStep] = useState<"explore" | "entry_cycle" | "requirements" | "special_interview" | "gap_interview" | "gap_results" | "planning" | null>(null);
   const [target, setTarget] = useState<ExploreTarget | null>(null);
   const [countries, setCountries] = useState<string[]>([]);
   const [targetMajor, setTargetMajor] = useState("");
@@ -329,6 +312,8 @@ export default function Home() {
   const [supplementRequirement, setSupplementRequirement] = useState("");
   const [supplementSourceUrl, setSupplementSourceUrl] = useState("");
   const [userEvidence, setUserEvidence] = useState<UserEvidence[]>([]);
+  const [specialInterviewPlan, setSpecialInterviewPlan] = useState<SpecialInterviewPlan | null>(null);
+  const [isSubmittingSpecialInterview, setIsSubmittingSpecialInterview] = useState(false);
   const [gapPlan, setGapPlan] = useState<GapPlan | null>(null);
   const [gapQuestionIndex, setGapQuestionIndex] = useState(0);
   const [gapFollowUpQuestion, setGapFollowUpQuestion] = useState("");
@@ -350,51 +335,31 @@ export default function Home() {
   const [actionPlan, setActionPlan] = useState<ActionPlan | null>(null);
   const [isPlanningActions, setIsPlanningActions] = useState(false);
   const [actionPlanError, setActionPlanError] = useState("");
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const discoveryRequestRef = useRef(0);
-  const currentTopic = topics[topicIndex];
-  const progress = showProfile ? 100 : Math.round((topicIndex / topics.length) * 100);
-  const messages = useMemo(() => turns.flatMap((item) => [
-    { role: "assistant" as const, content: item.question },
-    { role: "user" as const, content: item.answer },
-  ]), [turns]);
 
-  function submitAnswer(value: string) {
-    const answer = value.trim();
-    if (!answer || isProcessing || showProfile) return;
-
-    const turn: Answer = { topic: currentTopic.id, question: currentQuestion, answer };
-    const nextTurns = [...turns, turn];
-    setTurns(nextTurns);
-    setInput("");
-    setErrorMessage("");
-    setIsProcessing(true);
-    setProfile((current) => ({
-      ...current,
-      education: {
-        ...current.education,
-        [currentTopic.id]: answer,
-      },
-    }));
-    if (topicIndex === topics.length - 1) {
-      setProfileStatus("completed");
-      setShowProfile(true);
-      setTargetStep("explore");
-    } else {
-      const nextIndex = topicIndex + 1;
-      setTopicIndex(nextIndex);
-      setCurrentQuestion(topics[nextIndex].question);
+  useEffect(() => {
+    const cached = readStandardProfileCache(window.localStorage);
+    if (cached) {
+      setProfile(cached.profile);
+      setProfileStatus(cached.profileStatus);
+      setProfileEntryView(profileEntryViewForStatus(cached.profileStatus));
     }
-    setIsProcessing(false);
-    requestAnimationFrame(() => textareaRef.current?.focus());
+    setUserEvidence(readReusableEvidence<UserEvidence>(window.localStorage));
+    setProfileHydrated(true);
+  }, []);
+
+  function persistProfile(nextProfile: UserProfile, status: CachedProfileStatus) {
+    setProfile(nextProfile);
+    setProfileStatus(status);
+    writeStandardProfileCache(window.localStorage, nextProfile, status);
   }
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); submitAnswer(input); }
-  function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submitAnswer(input); }
+  function updateProfileDraft(nextProfile: UserProfile) {
+    persistProfile(nextProfile, "not_started");
   }
-  function skipProfile() {
-    setProfileStatus("skipped");
+
+  function continueToExplore(status: CachedProfileStatus) {
+    setProfileStatus(status);
     setShowProfile(true);
     setTargetStep("explore");
   }
@@ -402,10 +367,7 @@ export default function Home() {
   function returnToProfile() {
     setTargetStep(null);
     setShowProfile(false);
-    setTurns([]);
-    setTopicIndex(0);
-    setCurrentQuestion(topics[0].question);
-    setInput("");
+    setProfileEntryView(profileStatus === "completed" ? "summary" : "incomplete");
   }
 
   function toggleCountry(country: string) {
@@ -556,9 +518,7 @@ export default function Home() {
   }
 
   function mergeEvidence(current: UserEvidence[], incoming: UserEvidence[]) {
-    const merged = new Map(current.map((item) => [item.key.toLowerCase(), item]));
-    incoming.forEach((item) => merged.set(item.key.toLowerCase(), item));
-    return Array.from(merged.values());
+    return mergeReusableEvidence(current, incoming);
   }
 
   async function analyzeGap(plan: GapPlan, evidence: UserEvidence[]) {
@@ -587,6 +547,26 @@ export default function Home() {
     }
   }
 
+  async function runExistingGapPlan(evidence: UserEvidence[]) {
+    if (!activeTargetProgram || !requirementsReview) return;
+    const response = await fetch(`${API_BASE_URL}/gap/plan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target_program: activeTargetProgram,
+          requirements_review: requirementsReview,
+          user_profile: profile,
+          user_evidence: evidence,
+        }),
+      });
+    const data = await response.json();
+    if (!response.ok) throw new Error("匹配分析生成失败，请重新尝试。");
+    const plan = data as GapPlan;
+    setGapPlan(plan);
+    setTargetStep("gap_interview");
+    if (plan.questions.length === 0) await analyzeGap(plan, evidence);
+  }
+
   async function startGapInterview() {
     if (!activeTargetProgram || !requirementsReview || isPlanningGap) return;
     setIsPlanningGap(true);
@@ -599,27 +579,52 @@ export default function Home() {
     setGapFollowUpQuestionId("");
     setSatisfiedEvidenceGroups([]);
     setSelectedLanguageTest(null);
+    setSpecialInterviewPlan(null);
     try {
-      const response = await fetch(`${API_BASE_URL}/gap/plan`, {
+      const response = await fetch(`${API_BASE_URL}/special-interview/plan`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           target_program: activeTargetProgram,
           requirements_review: requirementsReview,
-          user_profile: profile,
           user_evidence: userEvidence,
         }),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error("匹配分析生成失败，请重新尝试。");
-      const plan = data as GapPlan;
-      setGapPlan(plan);
-      setTargetStep("gap_interview");
-      if (plan.questions.length === 0) await analyzeGap(plan, userEvidence);
+      if (!response.ok) throw new Error("项目特殊要求分析失败，请重新尝试。");
+      const plan = data as SpecialInterviewPlan;
+      setSpecialInterviewPlan(plan);
+      if (plan.remaining_item_count > 0) {
+        setTargetStep("special_interview");
+      } else {
+        await runExistingGapPlan(userEvidence);
+      }
     } catch (error) {
       setGapError(error instanceof Error ? error.message : "匹配分析生成失败，请重新尝试。");
     } finally {
       setIsPlanningGap(false);
+    }
+  }
+
+  async function submitSpecialInterview(answers: SpecialInterviewSubmission[]) {
+    if (!activeTargetProgram || isSubmittingSpecialInterview) return;
+    setIsSubmittingSpecialInterview(true);
+    setGapError("");
+    try {
+      const response = await fetch(`${API_BASE_URL}/special-interview/evidence/submit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target_program: activeTargetProgram, answers }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error("暂时无法保存这些背景信息，请重试。");
+      const nextEvidence = mergeEvidence(userEvidence, data.evidence as UserEvidence[]);
+      persistReusableEvidence(nextEvidence);
+      await runExistingGapPlan(nextEvidence);
+    } catch (error) {
+      setGapError(error instanceof Error ? error.message : "暂时无法保存这些背景信息，请重试。");
+    } finally {
+      setIsSubmittingSpecialInterview(false);
     }
   }
 
@@ -688,7 +693,7 @@ export default function Home() {
       .filter((need, index, all) => all.findIndex((item) => item.key === need.key) === index);
     const nextEvidence = mergeEvidence(userEvidence, parsed.evidence);
     const nextSatisfiedGroups = Array.from(new Set([...satisfiedEvidenceGroups, ...parsed.satisfied_evidence_groups]));
-    setUserEvidence(nextEvidence);
+    persistReusableEvidence(nextEvidence);
     setSatisfiedEvidenceGroups(nextSatisfiedGroups);
     setGapTurns((current) => [...current, { question: displayedQuestion, answer: answerLabel }]);
     setGapInput("");
@@ -1297,12 +1302,21 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [additionalPreferences, countries, discoverUniversities, rankingBasis, rankingMax, rankingMin, selectedSubject, selectedSubjectId, subjectUncertain, targetMajor, targetStep]);
 
+  if (!profileHydrated) {
+    return <main className={styles.page}><header className={styles.header}><div className={styles.brand}><span className={styles.brandMark}>知</span><span>知途留学</span></div><span className={styles.status}>正在读取背景信息…</span></header></main>;
+  }
+
+  function persistReusableEvidence(nextEvidence: UserEvidence[]) {
+    setUserEvidence(nextEvidence);
+    writeReusableEvidence(window.localStorage, nextEvidence);
+  }
+
   if (showProfile && targetStep) {
     return (
       <main className={`${styles.page} ${styles.targetPage}`}>
-        <header className={styles.header}><div className={styles.brand}><span className={styles.brandMark}>知</span><span>知途留学</span></div><span className={styles.status}>{targetStep === "planning" ? "06 · Planning Workflow" : targetStep === "gap_results" ? "05 · Gap Table" : targetStep === "gap_interview" ? "04 · 补充匹配信息" : targetStep === "requirements" ? "03 · 申请要求分析" : targetStep === "entry_cycle" ? "02 · 目标申请周期" : "02 · 目标院校与申请范围"}</span></header>
+        <header className={styles.header}><div className={styles.brand}><span className={styles.brandMark}>知</span><span>知途留学</span></div><span className={styles.status}>{targetStep === "planning" ? "06 · Planning Workflow" : targetStep === "gap_results" ? "05 · Gap Table" : targetStep === "special_interview" ? "04 · 项目特殊要求" : targetStep === "gap_interview" ? "04 · 补充匹配信息" : targetStep === "requirements" ? "03 · 申请要求分析" : targetStep === "entry_cycle" ? "02 · 目标申请周期" : "02 · 目标院校与申请范围"}</span></header>
         <section className={styles.targetShell}>
-          <div className={styles.moduleProgress}><span className={profileStatus === "completed" ? styles.moduleDone : styles.moduleSkipped}>{profileStatus === "completed" ? "✓ 基础信息" : "基础信息已跳过"}</span><i /><span className={targetStep === "explore" || targetStep === "entry_cycle" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "explore" ? "2 目标范围" : targetStep === "entry_cycle" ? "2 申请周期" : "✓ 目标项目"}</span>{targetStep !== "explore" && targetStep !== "entry_cycle" && <><i /><span className={targetStep === "requirements" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "requirements" ? "3 要求确认" : "✓ 要求确认"}</span></>}{(targetStep === "gap_interview" || targetStep === "gap_results" || targetStep === "planning") && <><i /><span className={targetStep === "gap_interview" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "gap_interview" ? "4 补充匹配信息" : "✓ 匹配信息"}</span></>}{(targetStep === "gap_results" || targetStep === "planning") && <><i /><span className={targetStep === "gap_results" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "gap_results" ? "5 Gap Table" : "✓ Gap Table"}</span></>}{targetStep === "planning" && <><i /><span className={styles.moduleCurrent}>6 行动计划</span></>}</div>
+          <div className={styles.moduleProgress}><span className={profileStatus === "completed" ? styles.moduleDone : styles.moduleSkipped}>{profileStatus === "completed" ? "✓ 基础信息" : "基础信息已跳过"}</span><i /><span className={targetStep === "explore" || targetStep === "entry_cycle" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "explore" ? "2 目标范围" : targetStep === "entry_cycle" ? "2 申请周期" : "✓ 目标项目"}</span>{targetStep !== "explore" && targetStep !== "entry_cycle" && <><i /><span className={targetStep === "requirements" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "requirements" ? "3 要求确认" : "✓ 要求确认"}</span></>}{(targetStep === "special_interview" || targetStep === "gap_interview" || targetStep === "gap_results" || targetStep === "planning") && <><i /><span className={targetStep === "special_interview" || targetStep === "gap_interview" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "special_interview" ? "4 项目特殊要求" : targetStep === "gap_interview" ? "4 补充匹配信息" : "✓ 匹配信息"}</span></>}{(targetStep === "gap_results" || targetStep === "planning") && <><i /><span className={targetStep === "gap_results" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "gap_results" ? "5 Gap Table" : "✓ Gap Table"}</span></>}{targetStep === "planning" && <><i /><span className={styles.moduleCurrent}>6 行动计划</span></>}</div>
 
           {targetStep === "explore" && <>
             <button type="button" className={styles.backButton} onClick={returnToProfile}>← {profileStatus === "completed" ? "返回基础信息" : "补充基础信息"}</button>
@@ -1410,6 +1424,15 @@ export default function Home() {
             </>}
           </div>}
 
+          {targetStep === "special_interview" && activeTargetProgram && specialInterviewPlan && <SpecialRequirementInterview
+            university={activeTargetProgram.university}
+            program={activeTargetProgram.program}
+            plan={specialInterviewPlan}
+            submitting={isSubmittingSpecialInterview}
+            error={gapError}
+            onSubmit={(answers) => void submitSpecialInterview(answers)}
+          />}
+
           {targetStep === "gap_interview" && activeTargetProgram && gapPlan && <div className={styles.gapInterviewStage}>
             <div className={styles.gapInterviewHeading}><p className={styles.eyebrow}>ADAPTIVE GAP INTERVIEW</p><h1>补充匹配信息</h1><p>我会根据当前项目的实际申请要求，只询问完成匹配分析所需要的信息，不会重复询问已经提供过的内容。</p><div><strong>{activeTargetProgram.university}</strong><span>{activeTargetProgram.program}</span></div></div>
             <div className={styles.gapInterviewMeta}><span>还需补充 <strong>{Math.max(gapPlan.questions.length - gapQuestionIndex, 0)}</strong> 项信息</span><span>已复用 {gapPlan.reusable_evidence.length} 项已有证据</span></div>
@@ -1458,35 +1481,5 @@ export default function Home() {
     );
   }
 
-  return (
-    <main className={styles.page}>
-      <header className={styles.header}><div className={styles.brand}><span className={styles.brandMark}>知</span><span>知途留学</span></div><span className={styles.status}>基础信息 · 约 1 分钟</span></header>
-      <div className={styles.workspace}>
-        <aside className={styles.sidebar} aria-label="访谈进度">
-          <div><p className={styles.eyebrow}>MINIMAL PROFILE</p><h1>先认识一下你的本科背景</h1><p className={styles.sidebarIntro}>这里只收集本科院校和专业。成绩、课程与经历会在选定项目后，根据当前 Requirements 按需询问。</p></div>
-          <div className={styles.progressBlock}><div className={styles.progressMeta}><span>完成进度</span><strong>{progress}%</strong></div><div className={styles.progressTrack}><span style={{ width: `${progress}%` }} /></div></div>
-          <ol className={styles.steps}>{topics.map((topic, index) => {
-            const state = index < topicIndex ? "done" : index === topicIndex ? "active" : "";
-            return <li key={topic.id} className={styles[state]}><span>{index < topicIndex ? "✓" : index + 1}</span><div><strong>{topic.label}</strong><small>{index < topicIndex ? "已完成" : index === topicIndex ? "进行中" : "待填写"}</small></div></li>;
-          })}</ol>
-          <p className={styles.privacy}>Ask once · 后续匹配会复用</p>
-        </aside>
-        <section className={styles.chat} aria-label="背景访谈对话">
-          <div className={styles.chatHeader}><div className={styles.advisorAvatar}>顾</div><div><strong>申请顾问小知</strong><span><i /> AI 正在协助整理</span></div><span className={styles.stepCount}>{topicIndex + 1} / {topics.length}</span></div>
-          <div className={styles.messages} aria-live="polite">
-            <div className={styles.dayLabel}>今天</div>
-            <div className={styles.welcome}><span>👋</span><div><strong>你好，很高兴认识你！</strong><p>先告诉我本科院校和专业即可。其他背景会等目标项目要求明确后再按需补充。</p><button type="button" className={styles.skipProfileAction} onClick={skipProfile}>暂时跳过，直接查看院校和项目 →</button></div></div>
-            {messages.map((message, index) => message.role === "assistant" ? <div className={styles.assistantRow} key={index}><div className={styles.miniAvatar}>知</div><p>{message.content}</p></div> : <div className={styles.userRow} key={index}><p>{message.content}</p></div>)}
-            {isProcessing ? <div className={`${styles.assistantRow} ${styles.thinkingRow}`}><div className={styles.miniAvatar}>知</div><p><span>●</span><span>●</span><span>●</span> 正在记录基础信息</p></div> : <div className={styles.assistantRow}><div className={styles.miniAvatar}>知</div><p>{currentQuestion}</p></div>}
-            {errorMessage && <div className={styles.inlineError}>{errorMessage}</div>}
-          </div>
-          <form className={styles.composer} onSubmit={handleSubmit}>
-            <label htmlFor="answer">你的回答</label>
-            <div className={styles.inputShell}><textarea ref={textareaRef} id="answer" rows={2} value={input} disabled={isProcessing} onChange={(event) => setInput(event.target.value)} onKeyDown={handleKeyDown} placeholder={currentTopic.hint} autoFocus /><button type="submit" disabled={!input.trim() || isProcessing} aria-label="发送回答">↑</button></div>
-            <div className={styles.composerFooter}><span>按 Enter 发送 · Shift + Enter 换行</span></div>
-          </form>
-        </section>
-      </div>
-    </main>
-  );
+  return <StandardProfileInterview profile={profile} profileStatus={profileStatus} entryView={profileEntryView} onDraftChange={updateProfileDraft} onSave={persistProfile} onExplore={continueToExplore} />;
 }

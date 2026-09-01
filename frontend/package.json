@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:profile": "node --experimental-strip-types scripts/test-standard-profile.ts",
+    "test:special-interview": "node --experimental-strip-types scripts/test-special-interview.ts"
   },
   "dependencies": {
     "next": "16.3.2",
