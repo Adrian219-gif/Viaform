@@ -81,10 +81,19 @@ def group(relation: str = "all_of", labels: list[str] | None = None):
 
 
 def evidence(label: str, availability: str = "known") -> application.UserEvidence:
+    item_id = application.authoritative_prerequisite_item_id(
+        "course:0", "concrete_course", label
+    )
     return application.UserEvidence(
         evidence_type="prerequisite_course",
-        key=application.special_evidence_key("prerequisite_course", label),
-        value={"canonical_label": label},
+        key=application.programme_course_evidence_key(target(), "course:0", item_id),
+        value={
+            "canonical_label": label,
+            "requirement_id": "course:0",
+            "item_id": item_id,
+            "prerequisite_kind": "concrete_course",
+            "reusable": False,
+        },
         raw_answer="fixture",
         availability=availability,
         updated_at="2026-09-01T00:00:00Z",
@@ -118,16 +127,23 @@ def run() -> None:
     assert [item.canonical_label for item in partial_all.prerequisite_groups[0].courses] == ["Probability"]
     passed.append("06 all_of only retains unanswered facts")
 
+    submitted_plan = plan(
+        application.SpecialTargetedExtractionOutput(
+            prerequisite_groups=[group(labels=["Linear Algebra", "Probability", "Algorithms"])]
+        ),
+        base_items,
+    )
+    submitted_courses = submitted_plan.prerequisite_groups[0].courses
     submitted = asyncio.run(application.special_interview_evidence_submit_endpoint(application.SpecialInterviewEvidenceSubmitRequest(target_program=target(), answers=[
-        application.SpecialInterviewAnswer(evidence_key=application.special_evidence_key("prerequisite_course", "Linear Algebra"), canonical_label="Linear Algebra", item_type="prerequisite_course", prerequisite_kind="concrete_course", availability="known", requirement_id="course:0", user_course_name="Matrix Algebra"),
-        application.SpecialInterviewAnswer(evidence_key=application.special_evidence_key("prerequisite_course", "Probability"), canonical_label="Probability", item_type="prerequisite_course", prerequisite_kind="concrete_course", availability="known_negative", requirement_id="course:0"),
-        application.SpecialInterviewAnswer(evidence_key=application.special_evidence_key("prerequisite_course", "Algorithms"), canonical_label="Algorithms", item_type="prerequisite_course", prerequisite_kind="concrete_course", availability="unknown", requirement_id="course:0"),
+        application.SpecialInterviewAnswer(evidence_key=submitted_courses[0].evidence_key, item_id=submitted_courses[0].item_id, canonical_label="Linear Algebra", item_type="prerequisite_course", prerequisite_kind="concrete_course", availability="known", requirement_id="course:0", user_course_name="Matrix Algebra"),
+        application.SpecialInterviewAnswer(evidence_key=submitted_courses[1].evidence_key, item_id=submitted_courses[1].item_id, canonical_label="Probability", item_type="prerequisite_course", prerequisite_kind="concrete_course", availability="known_negative", requirement_id="course:0"),
+        application.SpecialInterviewAnswer(evidence_key=submitted_courses[2].evidence_key, item_id=submitted_courses[2].item_id, canonical_label="Algorithms", item_type="prerequisite_course", prerequisite_kind="concrete_course", availability="unknown", requirement_id="course:0"),
     ])))
     assert [item.availability for item in submitted.evidence] == ["known", "known_negative", "unknown"] and submitted.evidence[0].value["user_course_name"] == "Matrix Algebra"
     passed.append("07 typed tri-state evidence is stored correctly")
 
-    assert application.special_evidence_key("prerequisite_course", "Linear Algebra") == application.special_evidence_key("prerequisite_course", "Linear Algebra")
-    passed.append("08 same course reuses stable cross-program key")
+    assert submitted_courses[0].item_id == application.authoritative_prerequisite_item_id("course:0", "concrete_course", "Linear Algebra")
+    passed.append("08 backend creates stable requirement-scoped item id")
 
     assert application.special_evidence_key("prerequisite_course", "Advanced Linear Algebra") != application.special_evidence_key("prerequisite_course", "Linear Algebra")
     passed.append("09 important course qualifiers remain distinct")
@@ -227,6 +243,7 @@ def run() -> None:
             target_program=target(),
             answers=[application.SpecialInterviewAnswer(
                 evidence_key=math_course.evidence_key,
+                item_id=math_course.item_id,
                 canonical_label="Mathematics",
                 item_type="prerequisite_course",
                 prerequisite_kind="course_category",
@@ -237,12 +254,12 @@ def run() -> None:
             )],
         )
     ))
-    user_courses = [item for item in math_submit.evidence if item.evidence_type == "user_course"]
-    assert [item.value["course_name"] for item in user_courses] == ["Calculus", "Linear Algebra"]
-    passed.append("24 category persists actual user course facts")
+    assert math_submit.evidence[0].value["matched_user_courses"] == ["Calculus", "Linear Algebra"]
+    assert not any(item.evidence_type == "user_course" for item in math_submit.evidence)
+    passed.append("24 category course names remain scoped inside the item response")
 
     assert not any(item.key == "course_category:systems" for item in math_submit.evidence)
-    assert math_submit.evidence[0].key.startswith("course_category_response:")
+    assert math_submit.evidence[0].key.startswith("programme_course_response:")
     assert math_submit.evidence[0].value["reusable"] is False
     passed.append("25 category satisfied state is requirement scoped")
 
@@ -251,6 +268,7 @@ def run() -> None:
             target_program=target(),
             answers=[application.SpecialInterviewAnswer(
                 evidence_key=systems_item.evidence_key,
+                item_id=systems_item.item_id,
                 canonical_label="Systems",
                 item_type="prerequisite_course",
                 prerequisite_kind="course_category",
@@ -274,11 +292,24 @@ def run() -> None:
         llm_requests=1,
     )
     assert other_plan.remaining_item_count == 1
-    assert other_plan.prerequisite_groups[0].courses[0].suggested_user_courses == ["Operating Systems"]
+    assert other_plan.prerequisite_groups[0].courses[0].suggested_user_courses == []
     passed.append("26 category does not auto-satisfy another programme")
 
     assert plan(application.SpecialTargetedExtractionOutput(prerequisite_groups=[group(labels=["Linear Algebra"])]), base_items, [evidence("Linear Algebra")]).remaining_item_count == 0
-    passed.append("27 concrete course ask-once remains reusable")
+    other_target = target().model_copy(update={"program": "MSc Other Programme", "official_program_url": "https://example.edu/other"})
+    other_linear_request = application.SpecialInterviewPlanRequest(
+        target_program=other_target,
+        requirements_review=review(base_items),
+        user_evidence=[evidence("Linear Algebra")],
+    )
+    other_linear_plan = application.build_special_interview_plan_from_extraction(
+        other_linear_request,
+        application.trusted_reviewed_requirements(other_linear_request.requirements_review),
+        application.SpecialTargetedExtractionOutput(prerequisite_groups=[group(labels=["Linear Algebra"])]),
+        llm_requests=1,
+    )
+    assert other_linear_plan.remaining_item_count == 1
+    passed.append("27 concrete course ask-once is limited to the same programme")
 
     assert application.special_evidence_key("prerequisite_course", "Advanced Linear Algebra") != application.special_evidence_key("prerequisite_course", "Linear Algebra")
     passed.append("28 advanced qualifier does not reuse base course")

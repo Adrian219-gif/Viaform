@@ -9,7 +9,7 @@ class MemoryStorage {
 }
 
 const storage = new MemoryStorage();
-const first = { key: "prerequisite_course:linear_algebra", availability: "known", value: { user_course_name: "Matrix Algebra" } };
+const first = { key: "programme_course_response:programme-a:requirement-a:course-linear-algebra", availability: "known", value: { user_course_name: "Matrix Algebra" } };
 writeReusableEvidence(storage as unknown as Storage, [first]);
 assert.deepEqual(readReusableEvidence(storage as unknown as Storage), [first], "refresh must restore reusable evidence");
 
@@ -19,12 +19,16 @@ const merged = mergeReusableEvidence([first, second], [updated]);
 assert.equal(merged.length, 2, "updating one fact must retain unrelated evidence");
 assert.equal(merged.find((item) => item.key === first.key)?.availability, "unknown", "same key must overwrite the old user fact");
 writeReusableEvidence(storage as unknown as Storage, merged);
-assert.equal(JSON.parse(storage.values.get(SPECIAL_EVIDENCE_CACHE_KEY) ?? "[]").length, 2, "cross-program cache must retain merged facts");
+assert.equal(JSON.parse(storage.values.get(SPECIAL_EVIDENCE_CACHE_KEY) ?? "[]").length, 2, "programme-scoped cache must retain merged facts");
 
 const scopedCategory = { key: "course_category_response:programme-specific", availability: "known" };
 const actualUserCourse = { key: "user_course:operating_systems", availability: "known", value: { course_name: "Operating Systems" } };
 writeReusableEvidence(storage as unknown as Storage, [scopedCategory, actualUserCourse]);
 assert.deepEqual(readReusableEvidence(storage as unknown as Storage), [actualUserCourse], "programme category conclusion must not enter global reusable cache");
+
+const programmeCategory = { key: "programme_course_response:programme-a:requirement-a:course-systems", availability: "known" };
+writeReusableEvidence(storage as unknown as Storage, [programmeCategory]);
+assert.deepEqual(readReusableEvidence(storage as unknown as Storage), [programmeCategory], "new programme-scoped category response must survive refresh");
 
 const renderer = readFileSync(new URL("../src/features/special-interview/SpecialRequirementInterview.tsx", import.meta.url), "utf8");
 assert.ok(renderer.includes("以下课程要求均需确认"), "all_of must use user-facing copy");

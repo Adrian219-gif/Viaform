@@ -7,6 +7,7 @@ import { EMPTY_STANDARD_PROFILE, StandardUserProfile } from "@/features/standard
 import { CachedProfileStatus, profileEntryView as profileEntryViewForStatus, readStandardProfileCache, writeStandardProfileCache } from "@/features/standard-profile/profile-cache";
 import SpecialRequirementInterview, { SpecialInterviewPlan, SpecialInterviewSubmission } from "@/features/special-interview/SpecialRequirementInterview";
 import { mergeReusableEvidence, readReusableEvidence, writeReusableEvidence } from "@/features/special-interview/evidence-cache";
+import { nextStepAfterSpecialExtraction } from "@/features/special-interview/workflow";
 
 type ProfileStatus = "not_started" | "completed" | "skipped";
 type UserProfile = StandardUserProfile;
@@ -53,6 +54,7 @@ type ApplicationTimeline = {
 type RequirementCategory = "academic" | "course" | "language" | "standardized_test" | "experience" | "materials" | "other";
 type RequirementCoverage = "official_verified" | "model_memory_unverified" | "user_supplied" | "not_found";
 type RequirementTemporalApplicability = "target_cycle_confirmed" | "undated" | "previous_cycle" | "not_yet_published" | "unknown";
+type RequirementApplicabilityStage = "pre_admission" | "conditional_admission" | "in_program" | "informational" | "unclear";
 type RequirementItem = {
   category: RequirementCategory;
   requirement: string;
@@ -65,6 +67,7 @@ type RequirementItem = {
   source_cycle: string | null;
   temporal_applicability: RequirementTemporalApplicability;
   temporal_note: string | null;
+  applicability_stage: RequirementApplicabilityStage;
 };
 type RequirementCategoryReview = { category: RequirementCategory; coverage: RequirementCoverage; requirements: RequirementItem[] };
 type TargetProgramRequirementsReview = { target_program: TargetProgram; checked_at: string; cache_source: "live" | "runtime_cache" | "seed"; categories: RequirementCategoryReview[] };
@@ -143,7 +146,11 @@ type PlanningAction = {
   status: "pending" | "in_progress" | "completed" | "blocked";
   depends_on: string[];
   parallel_group: string | null;
+  priority_order: number;
+  timing_status: "scheduled" | "urgent" | "priority_only";
 };
+type PlanningConfirmationItem = { source_gap_id: string; title: string; reason: string; action_kind: "confirm_information"; target_date: null };
+type PlanningEligibilityRisk = { source_gap_id: string; title: string; reason: string; target_date: null };
 type ActionPlan = {
   target_program: TargetProgram;
   generated_at: string;
@@ -153,6 +160,8 @@ type ActionPlan = {
   application_deadline_label: string | null;
   deadline_is_precise: boolean;
   ready_by_date: string | null;
+  needs_confirmation: PlanningConfirmationItem[];
+  eligibility_risks: PlanningEligibilityRisk[];
   actions: PlanningAction[];
   planning_llm_requests: number;
 };
@@ -232,7 +241,8 @@ const EMPTY_PROFILE: UserProfile = EMPTY_STANDARD_PROFILE;
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const DEFAULT_ENTRY_YEAR = new Date().getUTCFullYear() + 1;
 const TARGET_CONFIRMATION_TIMEOUT_MS = 35_000;
-const REQUIREMENTS_RETRIEVAL_TIMEOUT_MS = 130_000;
+// Keep a 30s transport/UI margin beyond the backend Requirements deadline.
+const REQUIREMENTS_RETRIEVAL_TIMEOUT_MS = 390_000;
 const TIMELINE_RETRIEVAL_TIMEOUT_MS = 130_000;
 const OVERALL_RANKING_EXPLANATION = "QS 综合排名与学科排名的覆盖范围不同。部分专业型院校可能未进入综合榜，但仍会出现在对应学科排名中。建议结合学科排名判断该校在目标领域的实力。";
 
@@ -503,6 +513,7 @@ export default function Home() {
       source_cycle: null,
       temporal_applicability: "undated",
       temporal_note: null,
+      applicability_stage: "pre_admission",
     };
     setRequirementsReview((current) => current ? {
       ...current,
@@ -547,7 +558,10 @@ export default function Home() {
     }
   }
 
-  async function runExistingGapPlan(evidence: UserEvidence[]) {
+  async function runExistingGapPlan(
+    evidence: UserEvidence[],
+    prerequisitePlan: SpecialInterviewPlan["authoritative_prerequisite_plan"] = specialInterviewPlan?.authoritative_prerequisite_plan ?? [],
+  ) {
     if (!activeTargetProgram || !requirementsReview) return;
     const response = await fetch(`${API_BASE_URL}/gap/plan`, {
         method: "POST",
@@ -557,14 +571,14 @@ export default function Home() {
           requirements_review: requirementsReview,
           user_profile: profile,
           user_evidence: evidence,
+          authoritative_prerequisite_plan: prerequisitePlan,
         }),
       });
     const data = await response.json();
     if (!response.ok) throw new Error("匹配分析生成失败，请重新尝试。");
     const plan = data as GapPlan;
     setGapPlan(plan);
-    setTargetStep("gap_interview");
-    if (plan.questions.length === 0) await analyzeGap(plan, evidence);
+    await analyzeGap(plan, evidence);
   }
 
   async function startGapInterview() {
@@ -594,10 +608,10 @@ export default function Home() {
       if (!response.ok) throw new Error("项目特殊要求分析失败，请重新尝试。");
       const plan = data as SpecialInterviewPlan;
       setSpecialInterviewPlan(plan);
-      if (plan.remaining_item_count > 0) {
+      if (nextStepAfterSpecialExtraction(plan.remaining_item_count) === "special_interview") {
         setTargetStep("special_interview");
       } else {
-        await runExistingGapPlan(userEvidence);
+        await runExistingGapPlan(userEvidence, plan.authoritative_prerequisite_plan);
       }
     } catch (error) {
       setGapError(error instanceof Error ? error.message : "匹配分析生成失败，请重新尝试。");
@@ -620,7 +634,10 @@ export default function Home() {
       if (!response.ok) throw new Error("暂时无法保存这些背景信息，请重试。");
       const nextEvidence = mergeEvidence(userEvidence, data.evidence as UserEvidence[]);
       persistReusableEvidence(nextEvidence);
-      await runExistingGapPlan(nextEvidence);
+      await runExistingGapPlan(
+        nextEvidence,
+        specialInterviewPlan?.authoritative_prerequisite_plan ?? [],
+      );
     } catch (error) {
       setGapError(error instanceof Error ? error.message : "暂时无法保存这些背景信息，请重试。");
     } finally {
@@ -729,6 +746,7 @@ export default function Home() {
             requirements_review: requirementsReview,
             user_profile: profile,
             user_evidence: nextEvidence,
+            authoritative_prerequisite_plan: specialInterviewPlan?.authoritative_prerequisite_plan ?? [],
           }),
         });
         const data = await response.json();
@@ -1314,9 +1332,9 @@ export default function Home() {
   if (showProfile && targetStep) {
     return (
       <main className={`${styles.page} ${styles.targetPage}`}>
-        <header className={styles.header}><div className={styles.brand}><span className={styles.brandMark}>知</span><span>知途留学</span></div><span className={styles.status}>{targetStep === "planning" ? "06 · Planning Workflow" : targetStep === "gap_results" ? "05 · Gap Table" : targetStep === "special_interview" ? "04 · 项目特殊要求" : targetStep === "gap_interview" ? "04 · 补充匹配信息" : targetStep === "requirements" ? "03 · 申请要求分析" : targetStep === "entry_cycle" ? "02 · 目标申请周期" : "02 · 目标院校与申请范围"}</span></header>
+        <header className={styles.header}><div className={styles.brand}><span className={styles.brandMark}>知</span><span>知途留学</span></div><span className={styles.status}>{targetStep === "planning" ? "06 · Planning Workflow" : targetStep === "gap_results" ? "05 · Gap Table" : targetStep === "special_interview" ? "04 · 项目特殊要求" : targetStep === "requirements" ? "03 · 申请要求分析" : targetStep === "entry_cycle" ? "02 · 目标申请周期" : "02 · 目标院校与申请范围"}</span></header>
         <section className={styles.targetShell}>
-          <div className={styles.moduleProgress}><span className={profileStatus === "completed" ? styles.moduleDone : styles.moduleSkipped}>{profileStatus === "completed" ? "✓ 基础信息" : "基础信息已跳过"}</span><i /><span className={targetStep === "explore" || targetStep === "entry_cycle" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "explore" ? "2 目标范围" : targetStep === "entry_cycle" ? "2 申请周期" : "✓ 目标项目"}</span>{targetStep !== "explore" && targetStep !== "entry_cycle" && <><i /><span className={targetStep === "requirements" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "requirements" ? "3 要求确认" : "✓ 要求确认"}</span></>}{(targetStep === "special_interview" || targetStep === "gap_interview" || targetStep === "gap_results" || targetStep === "planning") && <><i /><span className={targetStep === "special_interview" || targetStep === "gap_interview" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "special_interview" ? "4 项目特殊要求" : targetStep === "gap_interview" ? "4 补充匹配信息" : "✓ 匹配信息"}</span></>}{(targetStep === "gap_results" || targetStep === "planning") && <><i /><span className={targetStep === "gap_results" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "gap_results" ? "5 Gap Table" : "✓ Gap Table"}</span></>}{targetStep === "planning" && <><i /><span className={styles.moduleCurrent}>6 行动计划</span></>}</div>
+          <div className={styles.moduleProgress}><span className={profileStatus === "completed" ? styles.moduleDone : styles.moduleSkipped}>{profileStatus === "completed" ? "✓ 基础信息" : "基础信息已跳过"}</span><i /><span className={targetStep === "explore" || targetStep === "entry_cycle" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "explore" ? "2 目标范围" : targetStep === "entry_cycle" ? "2 申请周期" : "✓ 目标项目"}</span>{targetStep !== "explore" && targetStep !== "entry_cycle" && <><i /><span className={targetStep === "requirements" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "requirements" ? "3 要求确认" : "✓ 要求确认"}</span></>}{(targetStep === "special_interview" || targetStep === "gap_results" || targetStep === "planning") && <><i /><span className={targetStep === "special_interview" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "special_interview" ? "4 项目特殊要求" : "✓ 项目特殊要求"}</span></>}{(targetStep === "gap_results" || targetStep === "planning") && <><i /><span className={targetStep === "gap_results" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "gap_results" ? "5 Gap Table" : "✓ Gap Table"}</span></>}{targetStep === "planning" && <><i /><span className={styles.moduleCurrent}>6 行动计划</span></>}</div>
 
           {targetStep === "explore" && <>
             <button type="button" className={styles.backButton} onClick={returnToProfile}>← {profileStatus === "completed" ? "返回基础信息" : "补充基础信息"}</button>
@@ -1464,11 +1482,13 @@ export default function Home() {
               <div><span>Ready by</span><strong>{actionPlan.ready_by_date ?? "准备至可提交状态 / Ready for submission"}</strong></div>
               <div><span>Application Deadline</span><strong>{actionPlan.application_deadline ?? "官网暂未明确"}</strong>{!actionPlan.deadline_is_precise && <small>不会据此生成虚假精确日期</small>}</div>
             </div>
-            {actionPlan.actions.length === 0 ? <div className={styles.actionPlanEmpty}>当前所有可匹配要求均已满足，无需生成额外任务。</div> : <div className={styles.unifiedTimeline}>
+            {actionPlan.needs_confirmation.length > 0 && <section className={styles.planningDisposition}><strong>需要确认</strong>{actionPlan.needs_confirmation.map((item) => <article key={item.source_gap_id}><h2>{item.title}</h2><p>{item.reason}</p></article>)}</section>}
+            {actionPlan.eligibility_risks.length > 0 && <section className={`${styles.planningDisposition} ${styles.planningRisk}`}><strong>资格风险</strong>{actionPlan.eligibility_risks.map((item) => <article key={item.source_gap_id}><h2>{item.title}</h2><p>{item.reason}</p></article>)}</section>}
+            {actionPlan.actions.length === 0 && actionPlan.needs_confirmation.length === 0 && actionPlan.eligibility_risks.length === 0 ? <div className={styles.actionPlanEmpty}>当前所有可匹配要求均已满足，无需生成额外任务。</div> : actionPlan.actions.length > 0 && <div className={styles.unifiedTimeline}>
               {groupPlanningActions(actionPlan.actions).map((group) => <section key={group.timePeriod} className={styles.actionPeriod}>
                 <div className={styles.actionPeriodLabel}><span /> <strong>{planningDisplayText(group.timePeriod, actionPlan.deadline_is_precise)}</strong></div>
                 <div className={styles.actionPeriodItems}>{group.items.map((action) => <article key={action.action_id} className={action.plan_track === "optional" ? styles.optionalAction : styles.mainAction}>
-                  <div className={styles.actionCardTop}><span>{action.plan_track === "optional" ? "可选提升项" : action.action_kind === "confirm_information" ? "信息确认" : "主计划"}</span>{action.target_date && <time>{action.target_date}</time>}</div>
+                  <div className={styles.actionCardTop}><span>{action.timing_status === "urgent" ? "紧急" : `优先 ${action.priority_order}`}</span>{action.target_date && <time>{action.target_date}</time>}</div>
                   <h2>{planningDisplayText(action.action, actionPlan.deadline_is_precise)}</h2>
                   <p>{planningDisplayText(action.reason, actionPlan.deadline_is_precise)}</p>
                   <div className={styles.actionTags}><span>{action.priority === "high" ? "高优先级" : action.priority === "optional" ? "不阻塞主计划" : "常规优先级"}</span><span>{action.status === "pending" ? "待开始" : action.status}</span>{action.parallel_group && <span>可并行 · {action.parallel_group}</span>}</div>

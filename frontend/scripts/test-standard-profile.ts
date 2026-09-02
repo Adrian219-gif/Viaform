@@ -101,6 +101,8 @@ function completeFixture(): StandardUserProfile {
   assert.equal(profileEntryView(restored?.profileStatus ?? "not_started"), "summary");
   assert.equal(restored?.profile.education.gpa?.value, 3.6);
   assert.equal(restored?.profile.standardized_test.GRE_status, "none");
+  assert.equal(restored?.profile.materials.cv_status, "prepared");
+  assert.equal(restored?.profile.materials.confirmed_recommenders, 2);
   assert.deepEqual(restored?.profile.experience.research, ["historical research data"]);
 }
 {

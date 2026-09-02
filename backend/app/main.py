@@ -41,7 +41,9 @@ load_dotenv(BACKEND_DIR / ".env")
 QS_RANKINGS_DB = BACKEND_DIR / "data" / "rankings" / "qs_rankings.sqlite"
 QS_SUBJECTS_FILE = BACKEND_DIR / "data" / "rankings" / "qs_subjects.json"
 TARGET_PROGRAM_CONFIRMATION_TIMEOUT_SECONDS = 30.0
-REQUIREMENTS_TOTAL_TIMEOUT_SECONDS = 120.0
+# Preserve the full 180s Search budget plus a bounded 180s envelope for the
+# existing sequential official-page fallback and response processing.
+REQUIREMENTS_TOTAL_TIMEOUT_SECONDS = 360.0
 TIMELINE_TOTAL_TIMEOUT_SECONDS = 120.0
 WEB_SEARCH_TIMEOUT_SECONDS = 180.0
 OFFICIAL_PROGRAM_PAGE_TIMEOUT_SECONDS = 30.0
@@ -324,6 +326,13 @@ RequirementTemporalApplicability = Literal[
     "not_yet_published",
     "unknown",
 ]
+RequirementApplicabilityStage = Literal[
+    "pre_admission",
+    "conditional_admission",
+    "in_program",
+    "informational",
+    "unclear",
+]
 
 REQUIREMENT_CATEGORIES: List[str] = [
     "academic",
@@ -348,6 +357,7 @@ class RequirementItem(BaseModel):
     source_cycle: Optional[str] = None
     temporal_applicability: RequirementTemporalApplicability
     temporal_note: Optional[str] = None
+    applicability_stage: RequirementApplicabilityStage = "pre_admission"
 
     @field_validator("importance", mode="before")
     @classmethod
@@ -376,6 +386,23 @@ class RequirementsSearchAudit(BaseModel):
 class RequirementsWebSearchOutput(BaseModel):
     requirements: List[RequirementItem] = Field(default_factory=list)
     search_audit: Optional[RequirementsSearchAudit] = None
+
+
+def normalize_extracted_applicability_stages(
+    requirements: List[RequirementItem],
+) -> List[RequirementItem]:
+    """Never treat a model-omitted admission stage as pre-admission."""
+    normalized: List[RequirementItem] = []
+    for item in requirements:
+        if "applicability_stage" in item.model_fields_set:
+            normalized.append(item)
+            continue
+        logger.warning(
+            "requirements_applicability_stage_missing normalized=unclear requirement=%r",
+            item.requirement[:160],
+        )
+        normalized.append(item.model_copy(update={"applicability_stage": "unclear"}))
+    return normalized
 
 
 class RequirementCategoryReview(BaseModel):
@@ -521,20 +548,45 @@ class GapCourseRequirement(BaseModel):
     evidence_key: str = Field(min_length=1)
     course_name: str = Field(min_length=1)
     group_label: Optional[str] = None
+    prerequisite_kind: Optional[Literal["concrete_course", "course_category"]] = None
+    canonical_label: Optional[str] = None
     minimum_credits: Optional[float] = Field(default=None, ge=0)
     unit: Optional[str] = None
+    authoritative: bool = False
+    group_id: Optional[str] = None
+    group_relation: Optional[Literal["all_of", "one_of"]] = None
 
     @field_validator("evidence_key", "course_name", mode="before")
     @classmethod
     def normalize_required_text(cls, value: Any) -> Any:
         return value.strip() if isinstance(value, str) else value
 
-    @field_validator("group_label", "unit", mode="before")
+    @field_validator(
+        "group_label", "canonical_label", "unit", "group_id", mode="before"
+    )
     @classmethod
     def normalize_optional_text(cls, value: Any) -> Any:
         if value is None:
             return None
         return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+class AuthoritativePrerequisiteItem(BaseModel):
+    item_id: str = Field(min_length=1)
+    prerequisite_kind: Literal["concrete_course", "course_category"]
+    canonical_label: Optional[str] = None
+    category_label: Optional[str] = None
+    display_label: str = Field(min_length=1)
+    course_code: Optional[str] = None
+    minimum_courses: Optional[int] = Field(default=None, ge=1)
+    evidence_key: str = Field(min_length=1)
+
+
+class AuthoritativePrerequisiteGroup(BaseModel):
+    group_id: str = Field(min_length=1)
+    requirement_id: str = Field(min_length=1)
+    relation: Literal["all_of", "one_of"]
+    items: List[AuthoritativePrerequisiteItem] = Field(min_length=1)
 
 
 ConditionalPredicateOperator = Literal["equals", "in"]
@@ -1049,6 +1101,9 @@ class GapPlanRequest(BaseModel):
     requirements_review: TargetProgramRequirementsReview
     user_profile: UserProfile = Field(default_factory=UserProfile)
     user_evidence: List[UserEvidence] = Field(default_factory=list)
+    authoritative_prerequisite_plan: List[AuthoritativePrerequisiteGroup] = Field(
+        default_factory=list
+    )
 
 
 SpecialPrerequisiteRelation = Literal["all_of", "one_of"]
@@ -1100,6 +1155,7 @@ class SpecialTargetedExtractionOutput(BaseModel):
 
 
 class SpecialInterviewCourseItem(BaseModel):
+    item_id: str = Field(min_length=1)
     prerequisite_kind: Literal["concrete_course", "course_category"]
     canonical_label: Optional[str] = None
     category_label: Optional[str] = None
@@ -1143,6 +1199,9 @@ class SpecialInterviewPlan(BaseModel):
     prerequisite_groups: List[SpecialInterviewPrerequisiteGroup] = Field(
         default_factory=list
     )
+    authoritative_prerequisite_plan: List[AuthoritativePrerequisiteGroup] = Field(
+        default_factory=list
+    )
     objective_special_requirements: List[SpecialInterviewObjectiveItem] = Field(
         default_factory=list
     )
@@ -1155,6 +1214,7 @@ class SpecialInterviewPlan(BaseModel):
 
 class SpecialInterviewAnswer(BaseModel):
     evidence_key: str = Field(min_length=1)
+    item_id: Optional[str] = None
     canonical_label: str = Field(min_length=1)
     item_type: Literal["prerequisite_course", "objective_special"]
     prerequisite_kind: Optional[Literal["concrete_course", "course_category"]] = None
@@ -1376,6 +1436,7 @@ PlanningActionKind = Literal[
 PlanningPriority = Literal["high", "medium", "optional"]
 PlanningTrack = Literal["main", "optional"]
 PlanningActionStatus = Literal["pending", "in_progress", "completed", "blocked"]
+PlanningTimingStatus = Literal["scheduled", "urgent", "priority_only"]
 
 
 class ActionPlanRequest(BaseModel):
@@ -1412,6 +1473,23 @@ class PlanningAction(PlanningActionDraft):
     priority: PlanningPriority
     requirement_type: RequirementImportance
     plan_track: PlanningTrack
+    priority_order: int = Field(ge=1)
+    timing_status: PlanningTimingStatus
+
+
+class PlanningConfirmationItem(BaseModel):
+    source_gap_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    action_kind: Literal["confirm_information"] = "confirm_information"
+    target_date: None = None
+
+
+class PlanningEligibilityRisk(BaseModel):
+    source_gap_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    target_date: None = None
 
 
 class ActionPlan(BaseModel):
@@ -1423,8 +1501,10 @@ class ActionPlan(BaseModel):
     application_deadline_label: Optional[str] = None
     deadline_is_precise: bool = False
     ready_by_date: Optional[str] = None
+    needs_confirmation: List[PlanningConfirmationItem] = Field(default_factory=list)
+    eligibility_risks: List[PlanningEligibilityRisk] = Field(default_factory=list)
     actions: List[PlanningAction] = Field(default_factory=list)
-    planning_llm_requests: int = 1
+    planning_llm_requests: int = 0
 
 
 class OverallRanking(BaseModel):
@@ -2718,6 +2798,37 @@ REQUIREMENTS_IMPORTANCE_CONTRACT = (
     "applicability condition in the requirement text.\n"
 )
 
+REQUIREMENTS_APPLICABILITY_STAGE_CONTRACT = (
+    "ADMISSION-STAGE APPLICABILITY CONTRACT — for every extracted Requirement determine WHEN "
+    "the applicant or student must satisfy it. applicability_stage must be exactly one of "
+    "pre_admission, conditional_admission, in_program, informational, unclear. This dimension "
+    "is independent from verification_status and temporal_applicability.\n"
+    "- pre_admission: an applicant must already satisfy it or submit it to apply or be eligible "
+    "for admission, including degree/GPA eligibility, undergraduate prerequisites, tests, and "
+    "application documents.\n"
+    "- conditional_admission: an admission/application rule applies only when an explicit "
+    "applicant condition holds, including waivers or exemptions. Preserve the condition.\n"
+    "- in_program: it is completed after enrollment as part of the master's curriculum, degree, "
+    "progression, or graduation requirements.\n"
+    "- informational: true programme information such as tuition, funding, duration, location, "
+    "or processing information, but not an applicant qualification or submission requirement.\n"
+    "- unclear: the available official context cannot reliably establish when it applies. Never "
+    "upgrade unclear to pre_admission.\n"
+    "Use page title, section heading, nearby preceding/following sentences, and applicant versus "
+    "student/curriculum wording. A heading named Program Requirements or Requirements is not "
+    "proof of admission applicability. Words such as must, required, pass, or complete also do "
+    "not imply pre_admission: a mandatory rule can be in_program. Master's curriculum credits "
+    "or units, electives, qualifying units, performance maintained after enrollment, thesis or "
+    "capstone, and graduation rules strongly signal in_program. Applicant, application, "
+    "eligibility, before admission, undergraduate prerequisite, and documents to submit strongly "
+    "signal pre_admission. Do not classify every course rule as in_program: undergraduate work "
+    "an applicant must complete before admission is pre_admission.\n"
+    "Example — a Program Requirements section says: pass 96-108 units in qualifying master's "
+    "courses; pass one course from each of Systems, Theoretical Foundations, and Artificial "
+    "Intelligence; maintain a 3.0 QPA. Each item is in_program because it concerns coursework, "
+    "units, and academic performance after enrollment, not an applicant's prior qualification."
+)
+
 
 async def extract_requirements_from_official_program_page(
     target_program: TargetProgram,
@@ -2726,13 +2837,16 @@ async def extract_requirements_from_official_program_page(
         target_program.official_program_url
     )
     prompt = (
-        "Extract application Requirements only from the supplied official programme page "
+        "Prioritize extracting admission/application Requirements from the supplied official "
+        "programme page "
         "text. Do not use Web Search, model memory, or facts not explicitly supported by the "
         "page context. Look for Entry requirements, Admissions, How to apply, Supporting "
         "documents, Portfolio, Personal statement, application video, English language, "
         "academic eligibility, and other application requirements. Return partial coverage "
         "when only some requirements are present; return requirements=[] only when the supplied "
-        "page text contains no extractable application Requirement.\n\n"
+        "page text contains no extractable application Requirement. If the inspected page also "
+        "contains genuine in-program or informational programme statements, preserve them with "
+        "the correct applicability_stage instead of presenting them as admission requirements.\n\n"
         "EXTRACTION PRIORITY AND COMPLETENESS RULES:\n"
         "- Select and order items by this fixed priority: required eligibility and required "
         "application materials first; then conditional-required items; then recommended or "
@@ -2759,6 +2873,7 @@ async def extract_requirements_from_official_program_page(
         "must include an English requirement and a faithful concise Chinese requirement_zh.\n\n"
         f"{REQUIREMENTS_IMPORTANCE_CONTRACT}\n"
         f"{REQUIREMENTS_TEMPORAL_CONTRACT}\n\n"
+        f"{REQUIREMENTS_APPLICABILITY_STAGE_CONTRACT}\n\n"
         "For every extracted item set "
         "source_level=program, source_type=official_retrieval, "
         "verification_status=official_verified, and source_url to the supplied exact official "
@@ -2795,7 +2910,7 @@ async def extract_requirements_from_official_program_page(
                 "source_url": target_program.official_program_url,
             }
         )
-        for item in extraction.requirements
+        for item in normalize_extracted_applicability_stages(extraction.requirements)
     ]
     return RequirementsExtraction(requirements=normalized)
 
@@ -2818,6 +2933,7 @@ async def retrieve_target_program_requirements(
                 "source_cycle": "Fall 2027",
                 "temporal_applicability": "target_cycle_confirmed",
                 "temporal_note": None,
+                "applicability_stage": "pre_admission",
             },
             {
                 "category": "materials",
@@ -2831,6 +2947,7 @@ async def retrieve_target_program_requirements(
                 "source_cycle": None,
                 "temporal_applicability": "unknown",
                 "temporal_note": "The applicable entry cycle could not be confirmed.",
+                "applicability_stage": "unclear",
             }
         ],
         "search_audit": {
@@ -2846,14 +2963,23 @@ async def retrieve_target_program_requirements(
         },
     }
     prompt = (
-        "Use Web Search to extract the current application requirements for this exact "
-        "master's programme. Cover academic, course, language, standardized_test, experience, "
-        "materials, and other when evidence exists.\n\n"
+        "Use Web Search to answer this admission-oriented question for the exact master's "
+        "programme: What must an applicant satisfy or submit in order to apply or be eligible "
+        "for admission? Cover academic, course, language, standardized_test, experience, "
+        "materials, and other application requirements when evidence exists. Do not use "
+        "programme/degree/curriculum requirements as substitutes for admission requirements. "
+        "If genuine non-admission requirements are encountered while inspecting the same official "
+        "sources, preserve them with the correct applicability_stage rather than relabeling them "
+        "as admission requirements.\n\n"
         "SECTION-LEVEL SEARCH CONTRACT — use at most two Web Search calls and keep all credible "
         "requirements found across both results:\n"
         "1. When official_program_url is known, the first search must be anchored to that exact "
-        "URL, exact programme name, and official domain. Its search intent must cover Entry "
-        "requirements / Admissions / How to apply / Portfolio / Supporting documents. Treat "
+        "URL, exact programme name, and official domain. Prioritize queries equivalent to exact "
+        "programme name + admission requirements / application requirements / eligibility / "
+        "how to apply / prerequisites / required documents / graduate admissions. Its search "
+        "intent must cover Entry requirements / Admissions / How to apply / Portfolio / "
+        "Supporting documents. Do not use exact programme name + program requirements as the "
+        "primary admission query. Treat "
         "the programme page as the mandatory primary source. Inspect headings, anchors, tabs, "
         "accordions, and sections below the overview; an overview-only hit is not sufficient.\n"
         "2. After the first result, assess the accumulated programme-level evidence. If it is "
@@ -2915,6 +3041,7 @@ async def retrieve_target_program_requirements(
         "must include an English requirement and a faithful concise Chinese requirement_zh.\n\n"
         f"{REQUIREMENTS_IMPORTANCE_CONTRACT}\n"
         f"{REQUIREMENTS_TEMPORAL_CONTRACT}\n\n"
+        f"{REQUIREMENTS_APPLICABILITY_STAGE_CONTRACT}\n\n"
         "SEARCH AUDIT OUTPUT:\n"
         "- search_audit.search_attempts_completed must report how many of the allowed searches "
         "were actually completed.\n"
@@ -2950,6 +3077,13 @@ async def retrieve_target_program_requirements(
         )
         result = RequirementsWebSearchOutput(requirements=[])
     audit = result.search_audit
+    result = result.model_copy(
+        update={
+            "requirements": normalize_extracted_applicability_stages(
+                result.requirements
+            )
+        }
+    )
     logger.info(
         "requirements_section_recall program=%r search_attempts=%s programme_page_checked=%s "
         "sections_checked=%s requirement_count=%d",
@@ -3383,17 +3517,88 @@ def profile_user_evidence(profile: UserProfile) -> List[UserEvidence]:
                 profile.education.courses,
                 "；".join(profile.education.courses),
             )
-    for key, score in (
-        ("ielts", profile.language.IELTS),
-        ("toefl", profile.language.TOEFL),
-        ("gre", profile.standardized_test.GRE),
-        ("gmat", profile.standardized_test.GMAT),
+    for key, score, status, subscores in (
+        (
+            "ielts",
+            profile.language.IELTS,
+            profile.language.IELTS_status,
+            profile.language.IELTS_subscores,
+        ),
+        (
+            "toefl",
+            profile.language.TOEFL,
+            profile.language.TOEFL_status,
+            profile.language.TOEFL_subscores,
+        ),
+        (
+            "gre",
+            profile.standardized_test.GRE,
+            profile.standardized_test.GRE_status,
+            {},
+        ),
+        (
+            "gmat",
+            profile.standardized_test.GMAT,
+            profile.standardized_test.GMAT_status,
+            {},
+        ),
     ):
-        if score is not None:
-            evidence_type: GapEvidenceType = (
-                "language_score" if key in {"ielts", "toefl"} else "standardized_score"
+        evidence_type: GapEvidenceType = (
+            "language_score" if key in {"ielts", "toefl"} else "standardized_score"
+        )
+        if status == "none":
+            add(evidence_type, key, None, "没有正式成绩", "known_negative")
+        elif status == "unknown":
+            add(evidence_type, key, None, "不确定 / 不记得", "unknown")
+        elif score is not None:
+            add(
+                evidence_type,
+                key,
+                {
+                    "score": score,
+                    "scale": None,
+                    "subscores": {
+                        component: value
+                        for component, value in subscores.items()
+                        if value is not None
+                    },
+                },
+                str(score),
             )
-            add(evidence_type, key, {"score": score, "scale": None}, str(score))
+    material_statuses = (
+        ("materials.cv", profile.materials.cv_status),
+        ("materials.transcript", profile.materials.transcript_status),
+        ("materials.personal_statement", profile.materials.motivation_letter_status),
+        ("materials.portfolio", profile.materials.portfolio_status),
+    )
+    for key, status in material_statuses:
+        if status is None:
+            continue
+        if status == "prepared":
+            add(
+                "material_status",
+                key,
+                {"value_kind": "boolean", "value": True, "available": True},
+                "已准备",
+            )
+        elif status in {"not_prepared", "not_applicable"}:
+            add(
+                "material_status",
+                key,
+                {"value_kind": "boolean", "value": False, "available": False},
+                "未准备" if status == "not_prepared" else "不适用",
+                "known_negative",
+            )
+        else:
+            add("material_status", key, None, "不确定", "unknown")
+    if profile.materials.confirmed_recommenders is not None:
+        quantity = profile.materials.confirmed_recommenders
+        add(
+            "material_quantity",
+            "materials.recommendations",
+            {"value_kind": "numeric", "value": quantity, "quantity": quantity},
+            str(quantity),
+        )
     experience = [
         *profile.experience.projects,
         *profile.experience.research,
@@ -3411,15 +3616,37 @@ def profile_user_evidence(profile: UserProfile) -> List[UserEvidence]:
     return evidence
 
 
+def scoped_standard_material_owner_key(item: UserEvidence) -> Optional[str]:
+    canonical_key = canonical_evidence_key(item.key)
+    if not canonical_key.startswith(("material_item.", "material_quantity.")):
+        return None
+    if not isinstance(item.value, dict):
+        return None
+    material_type = item.value.get("material_type")
+    return {
+        "cv": "materials.cv",
+        "transcript": "materials.transcript",
+        "personal_statement": "materials.personal_statement",
+        "portfolio": "materials.portfolio",
+        "recommendation_letters": "materials.recommendations",
+    }.get(str(material_type))
+
+
 def merge_reusable_evidence(
     profile: UserProfile,
     user_evidence: List[UserEvidence],
 ) -> List[UserEvidence]:
     merged: Dict[str, UserEvidence] = {}
-    for item in profile_user_evidence(profile):
-        canonical_key = canonical_evidence_key(item.key)
-        merged[canonical_key] = item.model_copy(update={"key": canonical_key})
+    profile_evidence = profile_user_evidence(profile)
+    profile_keys = {canonical_evidence_key(item.key) for item in profile_evidence}
     for item in user_evidence:
+        scoped_owner_key = scoped_standard_material_owner_key(item)
+        if scoped_owner_key and scoped_owner_key in profile_keys:
+            logger.info(
+                "legacy_standard_profile_evidence_ignored key=%s source=standard_profile",
+                canonical_evidence_key(item.key),
+            )
+            continue
         canonical_key = canonical_evidence_key(item.key)
         canonical_item = item.model_copy(update={"key": canonical_key})
         existing = merged.get(canonical_key)
@@ -3434,6 +3661,9 @@ def merge_reusable_evidence(
                 }
             )
         merged[canonical_key] = canonical_item
+    for item in profile_evidence:
+        canonical_key = canonical_evidence_key(item.key)
+        merged[canonical_key] = item.model_copy(update={"key": canonical_key})
     return list(merged.values())
 
 
@@ -3606,6 +3836,15 @@ def canonical_evidence_value_kind(
     evidence_type: Any,
 ) -> Optional[EvidenceValueKind]:
     canonical_key = canonical_evidence_key(key)
+    if canonical_key.startswith(
+        (
+            "prerequisite_course:",
+            "course_category_response:",
+            "course_requirement.",
+            "programme_course_response:",
+        )
+    ):
+        return "boolean"
     key_leaf = canonical_key.rsplit(".", 1)[-1]
     if key_leaf == "degree_classification":
         return "categorical"
@@ -3864,6 +4103,8 @@ def formal_gap_requirements(
                 "user_supplied",
             }:
                 continue
+            if requirement.applicability_stage != "pre_admission":
+                continue
             direct_route_scope = requirement_route_scope(requirement.requirement)
             route_identities = named_application_route_identities(
                 requirement.requirement
@@ -3893,6 +4134,7 @@ def formal_gap_requirements(
                 "source_cycle": requirement.source_cycle,
                 "temporal_applicability": requirement.temporal_applicability,
                 "temporal_note": requirement.temporal_note,
+                "applicability_stage": requirement.applicability_stage,
                 "route_scope": route_scope,
                 "excluded_reason": (
                     "unsupported_special_internal_route"
@@ -4089,6 +4331,12 @@ def normalize_course_requirements(
             )
             continue
         seen_courses.add(dedup_key)
+        prerequisite_kind = item.prerequisite_kind
+        if prerequisite_kind is None:
+            if evidence_key.startswith("course_category_response:"):
+                prerequisite_kind = "course_category"
+            elif evidence_key.startswith("prerequisite_course:"):
+                prerequisite_kind = "concrete_course"
         normalized.append(
             item.model_copy(
                 update={
@@ -4096,9 +4344,60 @@ def normalize_course_requirements(
                         requirement_id, item.course_name
                     ),
                     "evidence_key": evidence_key,
+                    "prerequisite_kind": prerequisite_kind,
+                    "canonical_label": item.canonical_label or item.course_name,
                 }
             )
         )
+    return normalized
+
+
+def authoritative_gap_course_requirements(
+    target_program: TargetProgram,
+    requirement_id: str,
+    groups: List[AuthoritativePrerequisiteGroup],
+) -> List[GapCourseRequirement]:
+    normalized: List[GapCourseRequirement] = []
+    seen_item_ids: Set[str] = set()
+    for group in groups:
+        if group.requirement_id != requirement_id:
+            continue
+        for item in group.items:
+            source_identity = item.canonical_label or item.category_label or item.display_label
+            expected_item_id = authoritative_prerequisite_item_id(
+                requirement_id,
+                item.prerequisite_kind,
+                source_identity,
+            )
+            expected_key = programme_course_evidence_key(
+                target_program,
+                requirement_id,
+                expected_item_id,
+            )
+            if item.item_id != expected_item_id or canonical_evidence_key(
+                item.evidence_key
+            ) != expected_key:
+                logger.warning(
+                    "authoritative_course_item_invalid requirement_id=%s item_id=%s dropped=true",
+                    requirement_id,
+                    item.item_id,
+                )
+                continue
+            if item.item_id in seen_item_ids:
+                continue
+            seen_item_ids.add(item.item_id)
+            normalized.append(
+                GapCourseRequirement(
+                    item_id=item.item_id,
+                    evidence_key=expected_key,
+                    course_name=item.display_label,
+                    canonical_label=source_identity,
+                    prerequisite_kind=item.prerequisite_kind,
+                    authoritative=True,
+                    group_id=group.group_id,
+                    group_relation=group.relation,
+                )
+            )
     return normalized
 
 
@@ -4294,7 +4593,7 @@ def conditional_question_policy_view(
                     "course_requirements": [
                         item
                         for item in requirement.course_requirements
-                        if course_requirement_evidence_key(item.item_id)
+                        if gap_course_item_evidence_key(item)
                         in controlling_keys
                         or course_requirement_credit_evidence_key(item.item_id)
                         in controlling_keys
@@ -5028,6 +5327,10 @@ def gap_planner_prompt_payload(
             }
             for item in formal_requirements
         ],
+        "authoritative_prerequisite_plan": [
+            group.model_dump()
+            for group in request.authoritative_prerequisite_plan
+        ],
         "canonical_user_evidence": [
             {
                 "evidence_type": item.evidence_type,
@@ -5036,6 +5339,7 @@ def gap_planner_prompt_payload(
                 "availability": item.availability,
             }
             for item in reusable
+            if not is_legacy_global_course_evidence_key(item.key)
         ],
     }
 
@@ -5582,7 +5886,7 @@ def build_backend_course_questions(
             continue
         needs_by_key = {need.key: need for need in requirement.evidence_needs}
         item_needs = [
-            needs_by_key.get(course_requirement_evidence_key(item.item_id))
+            needs_by_key.get(gap_course_item_evidence_key(item))
             for item in requirement.course_requirements
         ]
         item_needs = [need for need in item_needs if need is not None]
@@ -6449,10 +6753,12 @@ def trusted_reviewed_requirements(
             "importance": requirement.importance,
             "source_url": requirement.source_url,
             "verification_status": requirement.verification_status,
+            "applicability_stage": requirement.applicability_stage,
         }
         for category in review.categories
         for index, requirement in enumerate(category.requirements)
         if requirement.verification_status in {"official_verified", "user_supplied"}
+        and requirement.applicability_stage == "pre_admission"
     ]
 
 
@@ -6473,6 +6779,54 @@ def special_evidence_key(item_type: str, canonical_label: str) -> str:
     return f"{prefix}:{special_evidence_slug(canonical_label)}"
 
 
+def authoritative_prerequisite_item_id(
+    requirement_id: str,
+    prerequisite_kind: Literal["concrete_course", "course_category"],
+    source_identity: str,
+) -> str:
+    """Build a stable id inside one Requirement; never an equivalence identity."""
+    normalized_source = " ".join(
+        unicodedata.normalize("NFKC", source_identity).casefold().split()
+    )
+    digest = hashlib.sha256(
+        f"{requirement_id}\n{prerequisite_kind}\n{normalized_source}".encode("utf-8")
+    ).hexdigest()[:16]
+    return f"course-{digest}"
+
+
+def prerequisite_course_code(label: str) -> Optional[str]:
+    match = re.match(r"^([A-Za-z]{2,}\d{3,}[A-Za-z]?)\b", label.strip())
+    return match.group(1).upper() if match else None
+
+
+def programme_course_evidence_key(
+    target_program: TargetProgram,
+    requirement_id: str,
+    item_id: str,
+) -> str:
+    identity = target_program_cache_identity(target_program)
+    programme_scope = programme_cache_key(identity)[:20]
+    requirement_scope = hashlib.sha256(
+        requirement_id.strip().casefold().encode("utf-8")
+    ).hexdigest()[:12]
+    return f"programme_course_response:{programme_scope}:{requirement_scope}:{item_id}"
+
+
+def gap_course_item_evidence_key(item: GapCourseRequirement) -> str:
+    return (
+        canonical_evidence_key(item.evidence_key)
+        if item.authoritative
+        else course_requirement_evidence_key(item.item_id)
+    )
+
+
+def is_legacy_global_course_evidence_key(key: str) -> bool:
+    canonical = canonical_evidence_key(key)
+    return canonical.startswith(
+        ("prerequisite_course:", "course_category_response:", "user_course:")
+    )
+
+
 def special_course_category_context_key(
     target_program: TargetProgram,
     requirement_id: str,
@@ -6490,6 +6844,95 @@ def special_course_category_context_key(
         ]
     )
     return f"course_category_response:{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:20]}"
+
+
+def resolve_course_evidence_for_requirement(
+    target_program: TargetProgram,
+    requirement: GapPlannedRequirement,
+    course_item: GapCourseRequirement,
+    canonical_evidence_by_key: Dict[str, UserEvidence],
+) -> Optional[UserEvidence]:
+    """Resolve one canonical course fact into a non-persistent scoped view."""
+    scoped_key = course_requirement_evidence_key(course_item.item_id)
+    explicit_scoped = canonical_evidence_by_key.get(scoped_key)
+    if explicit_scoped is not None:
+        return explicit_scoped
+
+    label = (course_item.canonical_label or course_item.course_name).strip()
+    category_candidates = [
+        special_course_category_context_key(
+            target_program,
+            requirement.requirement_id,
+            category_label,
+        )
+        for category_label in dict.fromkeys(
+            [label, course_item.course_name.strip()]
+        )
+        if category_label
+    ]
+    for category_key in category_candidates:
+        if not category_key:
+            continue
+        category_evidence = canonical_evidence_by_key.get(category_key)
+        if category_evidence is not None:
+            return category_evidence
+
+    if course_item.prerequisite_kind == "course_category":
+        return None
+    concrete_key = special_evidence_key("prerequisite_course", label)
+    return canonical_evidence_by_key.get(concrete_key)
+
+
+def runtime_course_evidence_view(
+    target_program: TargetProgram,
+    requirements: List[GapPlannedRequirement],
+    canonical_evidence_by_key: Dict[str, UserEvidence],
+) -> Dict[str, UserEvidence]:
+    """Materialize requirement-scoped course facts for this evaluation only."""
+    runtime = dict(canonical_evidence_by_key)
+    for requirement in requirements:
+        for course_item in requirement.course_requirements:
+            if course_item.authoritative:
+                continue
+            scoped_key = course_requirement_evidence_key(course_item.item_id)
+            if scoped_key in runtime:
+                continue
+            source = resolve_course_evidence_for_requirement(
+                target_program,
+                requirement,
+                course_item,
+                canonical_evidence_by_key,
+            )
+            if source is None:
+                continue
+            completed = (
+                True
+                if source.availability == "known"
+                else False
+                if source.availability == "known_negative"
+                else None
+            )
+            source_value = source.value if isinstance(source.value, dict) else {}
+            runtime[scoped_key] = UserEvidence(
+                evidence_type="courses",
+                key=scoped_key,
+                value={
+                    "requirement_id": requirement.requirement_id,
+                    "item_id": course_item.item_id,
+                    "course_name": course_item.course_name,
+                    "completed": completed,
+                    "user_course_name": source_value.get("user_course_name"),
+                    "matched_user_courses": source_value.get(
+                        "matched_user_courses", []
+                    ),
+                    "derived_from_key": source.key,
+                },
+                raw_answer=source.raw_answer,
+                availability=source.availability,
+                updated_at=source.updated_at,
+                source_requirement_ids=list(source.source_requirement_ids),
+            )
+    return runtime
 
 
 def user_course_evidence_key(course_name: str) -> str:
@@ -6605,18 +7048,11 @@ def build_special_interview_plan_from_extraction(
         )
         for item in request.user_evidence
     }
-    suggested_user_courses = [
-        str(item.value.get("course_name")).strip()
-        for key, item in reusable_by_key.items()
-        if key.startswith("user_course:")
-        and item.availability == "known"
-        and isinstance(item.value, dict)
-        and item.value.get("course_name")
-    ]
     groups: List[SpecialInterviewPrerequisiteGroup] = []
+    authoritative_groups: List[AuthoritativePrerequisiteGroup] = []
     seen_groups: Set[tuple[str, str, tuple[str, ...]]] = set()
     extracted_count = 0
-    for group_index, group in enumerate(extraction.prerequisite_groups):
+    for group in extraction.prerequisite_groups:
         source = sources.get(group.requirement_id)
         if source is None:
             logger.warning(
@@ -6624,61 +7060,90 @@ def build_special_interview_plan_from_extraction(
                 group.requirement_id,
             )
             continue
-        courses: List[SpecialInterviewCourseItem] = []
-        seen_course_keys: Set[str] = set()
+        authoritative_items: List[AuthoritativePrerequisiteItem] = []
+        seen_item_ids: Set[str] = set()
         for course in group.courses:
             label = course.canonical_label or course.category_label or ""
-            key = (
-                special_evidence_key("prerequisite_course", label)
-                if course.prerequisite_kind == "concrete_course"
-                else special_course_category_context_key(
-                    request.target_program,
-                    group.requirement_id,
-                    label,
-                )
+            item_id = authoritative_prerequisite_item_id(
+                group.requirement_id,
+                course.prerequisite_kind,
+                label,
             )
-            if key in seen_course_keys:
+            if item_id in seen_item_ids:
                 continue
-            seen_course_keys.add(key)
-            courses.append(
-                SpecialInterviewCourseItem(
+            seen_item_ids.add(item_id)
+            authoritative_items.append(
+                AuthoritativePrerequisiteItem(
+                    item_id=item_id,
                     prerequisite_kind=course.prerequisite_kind,
                     canonical_label=course.canonical_label,
                     category_label=course.category_label,
+                    display_label=label,
+                    course_code=(
+                        prerequisite_course_code(label)
+                        if course.prerequisite_kind == "concrete_course"
+                        else None
+                    ),
                     minimum_courses=course.minimum_courses,
-                    evidence_key=key,
-                    suggested_user_courses=(
-                        suggested_user_courses
-                        if course.prerequisite_kind == "course_category"
-                        else []
+                    evidence_key=programme_course_evidence_key(
+                        request.target_program,
+                        group.requirement_id,
+                        item_id,
                     ),
                 )
             )
         signature = (
             group.requirement_id,
             group.relation,
-            tuple(item.evidence_key for item in courses),
+            tuple(sorted(item.item_id for item in authoritative_items)),
         )
-        if not courses or signature in seen_groups:
+        if not authoritative_items or signature in seen_groups:
             continue
         seen_groups.add(signature)
-        extracted_count += len(courses)
+        group_digest = hashlib.sha256(
+            "\n".join(
+                [group.requirement_id, group.relation, *signature[2]]
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        group_id = f"special-prerequisite-{group_digest}"
+        authoritative_groups.append(
+            AuthoritativePrerequisiteGroup(
+                group_id=group_id,
+                requirement_id=group.requirement_id,
+                relation=group.relation,
+                items=authoritative_items,
+            )
+        )
+        extracted_count += len(authoritative_items)
         if group.relation == "one_of" and any(
             reusable_by_key.get(item.evidence_key) is not None
             and reusable_by_key[item.evidence_key].availability == "known"
-            for item in courses
+            for item in authoritative_items
         ):
             continue
-        remaining_courses = [
-            item for item in courses if item.evidence_key not in reusable_by_key
+        remaining_items = [
+            item
+            for item in authoritative_items
+            if item.evidence_key not in reusable_by_key
         ]
-        if not remaining_courses:
+        if not remaining_items:
             continue
         groups.append(
             SpecialInterviewPrerequisiteGroup(
-                group_id=f"special-prerequisite-{group_index}",
+                group_id=group_id,
                 relation=group.relation,
-                courses=remaining_courses,
+                courses=[
+                    SpecialInterviewCourseItem(
+                        item_id=item.item_id,
+                        prerequisite_kind=item.prerequisite_kind,
+                        canonical_label=item.canonical_label,
+                        category_label=item.category_label,
+                        minimum_courses=item.minimum_courses,
+                        evidence_key=item.evidence_key,
+                        suggested_user_courses=[],
+                    )
+                    for item in remaining_items
+                ],
                 source=SpecialInterviewSource(
                     requirement_id=group.requirement_id,
                     requirement=source["requirement"],
@@ -6726,6 +7191,7 @@ def build_special_interview_plan_from_extraction(
     return SpecialInterviewPlan(
         target_program=request.target_program,
         prerequisite_groups=groups,
+        authoritative_prerequisite_plan=authoritative_groups,
         objective_special_requirements=specials,
         reusable_evidence=list(reusable_by_key.values()),
         trusted_requirement_count=len(trusted_requirements),
@@ -6768,14 +7234,28 @@ async def special_interview_evidence_submit_endpoint(
     for answer in request.answers:
         if answer.item_type == "prerequisite_course" and answer.prerequisite_kind is None:
             raise HTTPException(status_code=422, detail="Missing prerequisite kind")
-        expected_key = (
-            special_course_category_context_key(
-                request.target_program,
+        expected_item_id = (
+            authoritative_prerequisite_item_id(
                 answer.requirement_id,
+                answer.prerequisite_kind,
                 answer.canonical_label,
             )
             if answer.item_type == "prerequisite_course"
-            and answer.prerequisite_kind == "course_category"
+            and answer.prerequisite_kind is not None
+            else None
+        )
+        if (
+            answer.item_type == "prerequisite_course"
+            and answer.item_id != expected_item_id
+        ):
+            raise HTTPException(status_code=422, detail="Invalid prerequisite item id")
+        expected_key = (
+            programme_course_evidence_key(
+                request.target_program,
+                answer.requirement_id,
+                expected_item_id or "",
+            )
+            if answer.item_type == "prerequisite_course"
             else special_evidence_key(answer.item_type, answer.canonical_label)
         )
         if canonical_evidence_key(answer.evidence_key) != expected_key:
@@ -6801,8 +7281,14 @@ async def special_interview_evidence_submit_endpoint(
             )
         value: Dict[str, Any] = {"canonical_label": answer.canonical_label.strip()}
         if answer.item_type == "prerequisite_course":
+            programme_scope = programme_cache_key(
+                target_program_cache_identity(request.target_program)
+            )
             value.update(
                 {
+                    "programme_scope": programme_scope,
+                    "requirement_id": answer.requirement_id,
+                    "item_id": expected_item_id,
                     "prerequisite_kind": answer.prerequisite_kind,
                     "user_course_name": (
                         answer.user_course_name.strip()
@@ -6821,7 +7307,7 @@ async def special_interview_evidence_submit_endpoint(
                         if answer.prerequisite_kind == "course_category"
                         else []
                     ),
-                    "reusable": answer.prerequisite_kind == "concrete_course",
+                    "reusable": False,
                 }
             )
         evidence.append(
@@ -6843,23 +7329,6 @@ async def special_interview_evidence_submit_endpoint(
                 source_requirement_ids=[answer.requirement_id],
             )
         )
-        if (
-            answer.item_type == "prerequisite_course"
-            and answer.prerequisite_kind == "course_category"
-            and answer.availability == "known"
-        ):
-            evidence.extend(
-                UserEvidence(
-                    evidence_type="user_course",
-                    key=user_course_evidence_key(course_name),
-                    value={"course_name": course_name},
-                    raw_answer=course_name,
-                    availability="known",
-                    updated_at=now,
-                    source_requirement_ids=[answer.requirement_id],
-                )
-                for course_name in cleaned_course_names
-            )
     return SpecialInterviewEvidenceSubmitResponse(evidence=evidence)
 
 
@@ -6962,8 +7431,14 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
         "不能追问或判断具体数量。B2 也不能自行创造 IELTS/TOEFL 分数等价关系。"
         "原文未给阈值时保持 null。"
         "推荐信数量、材料是否准备、考试阈值由代码计算，不能让后续 LLM 做算术。\n"
-        "每条 Requirement 还必须输出 course_requirements。只有原文明示 mandatory / required / must"
-        "修读的具体课程或知识项才逐门输出 evidence_key、course_name，可选 group_label 只保存原文"
+        "输入若包含 authoritative_prerequisite_plan，该 plan 是 prerequisite item 的唯一权威来源；"
+        "你不得为对应 requirement_id 创建、删除、改名或重新拆分 course item，也不得生成新的"
+        " item_id。对应 Requirement 的 course_requirements 应保持空数组；Backend 会直接注入"
+        " authoritative items。没有 authoritative plan 的旧兼容请求才按下列规则输出"
+        " course_requirements。只有原文明示 mandatory / required / must"
+        "修读的具体课程或知识项才逐门输出 evidence_key、course_name、canonical_label 和"
+        "prerequisite_kind。prerequisite_kind 只能是 concrete_course 或 course_category：明确"
+        "具体课程用 concrete_course，项目定义的课程类别/方向用 course_category。可选 group_label 只保存原文"
         "明确的 domain heading，以及原文明示时才填写的 minimum_credits 和 unit。如果 mandatory"
         " Requirement 先列出领域，再在括号中穷举该领域所需的具体 introductory topics（例如"
         "Domain (item A, item B, item C)），括号内每个 item 都是独立 required course_requirement，"
@@ -7425,11 +7900,52 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
             )
             if all(existing.key != canonical_key for existing in normalized_needs):
                 normalized_needs.append(normalized)
-        normalized_course_requirements = normalize_course_requirements(
-            requirement_id,
-            item.course_requirements,
-            normalized_needs,
+        has_authoritative_course_plan = any(
+            group.requirement_id == requirement_id
+            for group in request.authoritative_prerequisite_plan
         )
+        if has_authoritative_course_plan:
+            if item.course_requirements:
+                logger.warning(
+                    "gap_planner_course_items_ignored requirement_id=%s count=%d authority=backend",
+                    requirement_id,
+                    len(item.course_requirements),
+                )
+            normalized_course_requirements = authoritative_gap_course_requirements(
+                request.target_program,
+                requirement_id,
+                request.authoritative_prerequisite_plan,
+            )
+            authoritative_credit_options = [
+                option
+                for option in normalized_constraint.options
+                if (option.kind or normalized_constraint.kind) == "course_credit"
+            ]
+            normalized_constraint = normalized_constraint.model_copy(
+                update={
+                    "kind": (
+                        "course_credit" if authoritative_credit_options else "none"
+                    ),
+                    "options": authoritative_credit_options,
+                    "relation": (
+                        "any"
+                        if not authoritative_credit_options
+                        and normalized_course_requirements
+                        and {
+                            course.group_relation
+                            for course in normalized_course_requirements
+                        }
+                        == {"one_of"}
+                        else "all"
+                    ),
+                }
+            )
+        else:
+            normalized_course_requirements = normalize_course_requirements(
+                requirement_id,
+                item.course_requirements,
+                normalized_needs,
+            )
         course_item_source_keys = {
             course_item.evidence_key
             for course_item in normalized_course_requirements
@@ -7443,8 +7959,14 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
         normalized_needs = [
             need
             for need in normalized_needs
-            if need.key not in course_item_source_keys
-            or need.key in course_credit_keys
+            if (
+                (
+                    not has_authoritative_course_plan
+                    and need.key not in course_item_source_keys
+                )
+                or need.key in course_credit_keys
+                or need.evidence_type != "courses"
+            )
         ]
         for course_item in normalized_course_requirements:
             course_item_label = (
@@ -7453,13 +7975,15 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
                 else course_item.course_name
             )
             item_need = GapEvidenceNeed(
-                key=course_requirement_evidence_key(course_item.item_id),
+                key=gap_course_item_evidence_key(course_item),
                 evidence_type="courses",
                 value_kind="boolean",
                 label=course_item_label,
                 required_fields=["completed"],
                 evidence_group=requirement_id,
-                group_relation="all",
+                group_relation=(
+                    "any" if course_item.group_relation == "one_of" else "all"
+                ),
             )
             reusable_item = reusable_by_key.get(item_need.key)
             item_need.already_known = bool(
@@ -7650,11 +8174,34 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
             )
         )
 
+    runtime_reusable_by_key = runtime_course_evidence_view(
+        request.target_program,
+        planned,
+        reusable_by_key,
+    )
+    planned = [
+        item.model_copy(
+            update={
+                "evidence_needs": [
+                    need.model_copy(
+                        update={
+                            "already_known": bool(
+                                (existing := runtime_reusable_by_key.get(need.key))
+                                and evidence_is_terminal_for_need(need, existing)
+                            )
+                        }
+                    )
+                    for need in item.evidence_needs
+                ]
+            }
+        )
+        for item in planned
+    ]
     planned = [
         item.model_copy(
             update={
                 "conditional_state": resolve_conditional_state(
-                    item, reusable_by_key
+                    item, runtime_reusable_by_key
                 )
             }
         )
@@ -7686,42 +8233,42 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
 
     questions, covered_missing_keys = build_backend_academic_questions(
         question_policy_requirements,
-        reusable_by_key,
+        runtime_reusable_by_key,
     )
     language_questions, language_covered_keys = build_backend_language_questions(
         question_policy_requirements,
-        reusable_by_key,
+        runtime_reusable_by_key,
     )
     questions.extend(language_questions)
     covered_missing_keys.update(language_covered_keys)
     course_questions, course_covered_keys = build_backend_course_questions(
         question_policy_requirements,
-        reusable_by_key,
+        runtime_reusable_by_key,
     )
     questions.extend(course_questions)
     covered_missing_keys.update(course_covered_keys)
     gre_questions, gre_covered_keys = build_backend_gre_questions(
         question_policy_requirements,
-        reusable_by_key,
+        runtime_reusable_by_key,
     )
     questions.extend(gre_questions)
     covered_missing_keys.update(gre_covered_keys)
     experience_questions, experience_covered_keys = build_backend_experience_questions(
         question_policy_requirements,
-        reusable_by_key,
+        runtime_reusable_by_key,
     )
     questions.extend(experience_questions)
     covered_missing_keys.update(experience_covered_keys)
     material_questions, material_covered_keys = build_backend_material_questions(
         question_policy_requirements,
-        reusable_by_key,
+        runtime_reusable_by_key,
     )
     questions.extend(material_questions)
     covered_missing_keys.update(material_covered_keys)
     controller_questions, controller_covered_keys = (
         build_backend_conditional_controller_questions(
             question_policy_requirements,
-            reusable_by_key,
+            runtime_reusable_by_key,
             covered_missing_keys,
         )
     )
@@ -7741,7 +8288,7 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
     ]
     other_questions, other_covered_keys = build_backend_other_questions(
         other_policy_requirements,
-        reusable_by_key,
+        runtime_reusable_by_key,
     )
     questions.extend(other_questions)
     covered_missing_keys.update(other_covered_keys)
@@ -7757,9 +8304,11 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
         group
         for group, needs in reusable_any_groups.items()
         if any(
-            evidence_satisfies_need(need, reusable_by_key[need.key.casefold()])
+            evidence_satisfies_need(
+                need, runtime_reusable_by_key[need.key.casefold()]
+            )
             for need in needs
-            if need.key.casefold() in reusable_by_key
+            if need.key.casefold() in runtime_reusable_by_key
         )
     }
     ai_reference_keys = {
@@ -7854,7 +8403,7 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
                 ),
                 missing_keys,
                 question_needs_by_key,
-                reusable_by_key,
+                runtime_reusable_by_key,
             )
         )
         covered_missing_keys.update(missing_keys)
@@ -7999,7 +8548,7 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
     questions, repair_calls = await repair_gap_questions_once(
         questions,
         {item.requirement_id: item for item in question_policy_requirements},
-        reusable_by_key,
+        runtime_reusable_by_key,
     )
     scope_legacy_material_evidence(planned, reusable_by_key)
     return GapPlan(
@@ -9695,12 +10244,22 @@ def evaluate_deterministic_requirement(
         for option in constraint.options
     ]
     for course_item in planned.course_requirements:
-        item_key = course_requirement_evidence_key(course_item.item_id)
+        item_key = gap_course_item_evidence_key(course_item)
         evidence = evidence_by_key.get(item_key)
         user_text = evidence_display(evidence)
         completed = (
-            evidence.value.get("completed")
-            if evidence and isinstance(evidence.value, dict)
+            True
+            if course_item.authoritative
+            and evidence
+            and evidence.availability == "known"
+            else False
+            if course_item.authoritative
+            and evidence
+            and evidence.availability == "known_negative"
+            else evidence.value.get("completed")
+            if evidence
+            and isinstance(evidence.value, dict)
+            and not course_item.authoritative
             else None
         )
         if not isinstance(completed, bool):
@@ -9899,6 +10458,11 @@ async def analyze_gap(request: GapAnalysisRequest) -> GapAnalysisResponse:
         for item in request.plan.requirements
     ]
     scope_legacy_material_evidence(runtime_requirements, evidence_by_key)
+    evidence_by_key = runtime_course_evidence_view(
+        request.target_program,
+        runtime_requirements,
+        evidence_by_key,
+    )
     semantic_tasks = []
     deterministic_results: Dict[str, tuple[GapStatus, str, str, str]] = {}
     informational = []
@@ -10184,166 +10748,274 @@ def planning_deadline(
     return selected.date, selected.label, None
 
 
-def planning_ready_by(deadline: date, today: date) -> date:
-    days_remaining = (deadline - today).days
-    if days_remaining >= 60:
-        buffer_days = 21
-    elif days_remaining >= 30:
-        buffer_days = 14
-    elif days_remaining >= 14:
-        buffer_days = 7
-    elif days_remaining >= 3:
-        buffer_days = 2
-    else:
-        buffer_days = 1
-    return deadline - timedelta(days=buffer_days)
+PLANNING_BUFFER_WEEKS: Dict[str, int] = {
+    "language_test_no_valid_score": 20,
+    "language_test_retake": 8,
+    "standardized_test_no_score": 20,
+    "standardized_test_retake": 8,
+    "recommendation_letter": 10,
+    "portfolio": 6,
+    "sop": 4,
+    "ps": 4,
+    "motivation_letter": 4,
+    "writing_sample": 4,
+    "cv": 2,
+    "resume": 2,
+    "transcript": 2,
+    "degree_certificate": 2,
+    "passport": 2,
+    "id_document": 2,
+    "generic_material": 2,
+    "application_form": 1,
+    "application_fee": 1,
+}
+
+PLANNING_ACTION_TITLES: Dict[str, str] = {
+    "ielts": "取得满足项目要求的 IELTS 成绩",
+    "toefl": "取得满足项目要求的 TOEFL 成绩",
+    "language_test": "取得满足项目要求的语言考试成绩",
+    "standardized_test": "取得满足项目要求的标准化考试成绩",
+    "recommendation_letter": "落实项目要求数量的推荐人及推荐信安排",
+    "portfolio": "完成 Portfolio 最终版本",
+    "sop": "完成 Statement of Purpose 最终版本",
+    "ps": "完成 Personal Statement 最终版本",
+    "motivation_letter": "完成 Motivation Letter 最终版本",
+    "writing_sample": "完成 Writing Sample 最终版本",
+    "cv": "完成 CV 最终版本",
+    "resume": "完成 Resume 最终版本",
+    "transcript": "准备并确认可提交的官方成绩单",
+    "degree_certificate": "准备并确认可提交的学位证明",
+    "passport": "准备有效护照材料",
+    "id_document": "准备有效身份证明材料",
+    "application_form": "完成申请表并准备至可提交状态",
+    "application_fee": "准备申请费支付",
+    "generic_material": "准备并确认可提交的项目要求材料",
+}
+
+PLANNING_MATERIAL_RULES: List[tuple[str, str]] = [
+    ("recommendation_letter", r"letters? of recommendation|recommendation letters?|reference letters?|\breferences\b|推荐信|推荐人"),
+    ("motivation_letter", r"motivation letter|动机信"),
+    ("sop", r"statement of purpose|\bsop\b"),
+    ("ps", r"personal statement|\bps\b|个人陈述"),
+    ("writing_sample", r"writing sample|写作样本"),
+    ("transcript", r"transcript|成绩单"),
+    ("degree_certificate", r"degree certificate|degree proof|学位证明|学位证"),
+    ("portfolio", r"portfolio|work sample|作品集"),
+    ("resume", r"\bresume\b|履历"),
+    ("cv", r"\bcv\b|curriculum vitae|简历"),
+    ("passport", r"passport|护照"),
+    ("id_document", r"identification|identity document|\bid\b|身份证明"),
+    ("application_form", r"application form|申请表"),
+    ("application_fee", r"application fee|申请费"),
+]
 
 
-def conditional_requirement_unconfirmed(gap: GapResult) -> bool:
-    if gap.status != "unknown":
-        return False
-    if (
-        gap.conditional_state == "pending"
-        or gap.reason_code == "conditional_pending"
+def planning_gap_text(gap: GapResult) -> str:
+    return " ".join(
+        part for part in (
+            gap.requirement,
+            gap.requirement_zh or "",
+            gap.user_evidence,
+            gap.gap,
+            gap.reason,
+        ) if part
+    ).casefold()
+
+
+def planning_score_buffer(gap: GapResult, prefix: str) -> Optional[tuple[str, int]]:
+    if gap.status == "partial":
+        key = f"{prefix}_retake"
+        return key, PLANNING_BUFFER_WEEKS[key]
+    evidence = gap.user_evidence.casefold().strip()
+    if re.search(r"\d+(?:\.\d+)?", evidence):
+        key = f"{prefix}_retake"
+        return key, PLANNING_BUFFER_WEEKS[key]
+    if not evidence or re.search(
+        r"未提供|没有|暂无|无有效|no (?:valid )?score|not available|known_negative",
+        evidence,
     ):
-        return True
-    text = f"{gap.requirement} {gap.requirement_zh or ''}".casefold()
-    return bool(
-        re.search(
-            r"\bif\b|where applicable|when required|depending on|may be required|"
-            r"如适用|如果|若|视情况|可能要求|可能需要",
-            text,
-        )
-    )
+        suffix = "no_valid_score" if prefix == "language_test" else "no_score"
+        key = f"{prefix}_{suffix}"
+        return key, PLANNING_BUFFER_WEEKS[key]
+    return None
 
 
-def hard_requirement(gap: GapResult) -> bool:
-    if gap.importance == "required":
-        return True
-    if gap.importance in {"recommended", "preferred"}:
-        return False
-    text = f"{gap.requirement} {gap.requirement_zh or ''}".casefold()
-    return bool(
-        re.search(
-            r"\brequired\b|\bmust\b|\bmandatory\b|\bshall\b|必须|须|硬性要求",
-            text,
-        )
-    )
+def planning_actionability(gap: GapResult) -> Dict[str, Any]:
+    """Classify a Gap only through explicit Planning-owned rules."""
+    text = planning_gap_text(gap)
+    if gap.status == "met" or gap.conditional_state == "inactive":
+        return {"disposition": "skip"}
+    if gap.status == "unknown":
+        return {
+            "disposition": "confirmation",
+            "selected_action_kind": "confirm_information",
+        }
+    if gap.importance != "required":
+        return {"disposition": "skip"}
+
+    if gap.category == "academic" and re.search(
+        r"major|academic background|degree type|degree classification|\bgpa\b|"
+        r"本科专业|学术背景|学位类型|学位等级|平均绩点|最终成绩",
+        text,
+    ):
+        return {"disposition": "eligibility_risk"}
+    if gap.category == "course" and re.search(
+        r"prerequisite|required course|mandatory course|minimum .*credits?|\bects\b|"
+        r"先修|必修|最低.*学分|课程要求",
+        text,
+    ):
+        return {"disposition": "eligibility_risk"}
+    if gap.category == "experience" and re.search(
+        r"minimum|at least|\d+\s*(?:years?|months?)|最低|至少|年.*经验|个月.*经验",
+        text,
+    ):
+        return {"disposition": "eligibility_risk"}
+
+    action_type: Optional[str] = None
+    buffer_key: Optional[str] = None
+    buffer_weeks: Optional[int] = None
+    if gap.category == "language" or re.search(r"\bielts\b|\btoefl\b|language test|语言考试", text):
+        score_buffer = planning_score_buffer(gap, "language_test")
+        if score_buffer is None:
+            return {"disposition": "confirmation"}
+        buffer_key, buffer_weeks = score_buffer
+        action_type = "ielts" if "ielts" in text else "toefl" if "toefl" in text else "language_test"
+    elif gap.category == "standardized_test" or re.search(
+        r"\bgre\b|\bgmat\b|\blsat\b|standardized test|标准化考试", text
+    ):
+        score_buffer = planning_score_buffer(gap, "standardized_test")
+        if score_buffer is None:
+            return {"disposition": "confirmation"}
+        buffer_key, buffer_weeks = score_buffer
+        action_type = "standardized_test"
+    else:
+        for candidate, pattern in PLANNING_MATERIAL_RULES:
+            if re.search(pattern, text):
+                action_type = candidate
+                break
+        if action_type == "portfolio" and re.search(
+            r"未提供|没有|暂无|no portfolio|known_negative", gap.user_evidence.casefold()
+        ):
+            return {"disposition": "confirmation"}
+        if action_type is None and gap.category == "materials":
+            action_type = "generic_material"
+        if action_type is not None:
+            buffer_key = action_type
+            buffer_weeks = PLANNING_BUFFER_WEEKS[action_type]
+
+    if action_type is None or buffer_key is None or buffer_weeks is None:
+        return {"disposition": "confirmation"}
+    return {
+        "disposition": "action",
+        "action_type": action_type,
+        "buffer_key": buffer_key,
+        "buffer_weeks": buffer_weeks,
+        "selected_action_kind": "complete_gap" if gap.status == "partial" else "resolve_gap",
+    }
 
 
 def select_planning_gaps(gaps: List[GapResult]) -> List[Dict[str, Any]]:
-    selected = []
-    action_by_status: Dict[GapStatus, PlanningActionKind] = {
-        "partial": "complete_gap",
-        "not_met": "resolve_gap",
-        "unknown": "confirm_information",
-        "met": "confirm_information",
-    }
+    selected: List[Dict[str, Any]] = []
     for gap in gaps:
-        if gap.status == "met":
+        classification = planning_actionability(gap)
+        if classification["disposition"] == "skip":
             continue
-        optional = gap.importance in {"recommended", "preferred"}
-        hard = hard_requirement(gap)
-        conditional_confirmation_only = conditional_requirement_unconfirmed(gap)
-        action_kind: PlanningActionKind = (
-            "confirm_information"
-            if conditional_confirmation_only
-            else action_by_status[gap.status]
-        )
-        selected.append(
-            {
-                **gap.model_dump(),
-                "selected_action_kind": action_kind,
-                "conditional_confirmation_only": conditional_confirmation_only,
-                "plan_track": "optional" if optional else "main",
-                "priority": "optional" if optional else ("high" if hard else "medium"),
-                "requirement_type": "required" if hard else gap.importance,
-            }
-        )
+        selected.append({**gap.model_dump(), **classification})
     return selected
 
 
+def planning_requirement_title(gap: GapResult) -> str:
+    title = (gap.requirement_zh or gap.requirement).strip()
+    return title if len(title) <= 120 else f"{title[:117]}..."
+
+
+def planning_action_title(action_type: str, gap: GapResult) -> str:
+    text = f"{gap.requirement} {gap.requirement_zh or ''}"
+    if action_type == "recommendation_letter":
+        quantity = re.search(
+            r"(\d+)\s*(?:letters? of recommendation|recommendation letters?|"
+            r"reference letters?|封推荐信|位推荐人)",
+            text,
+            re.IGNORECASE,
+        )
+        if quantity:
+            return f"落实 {quantity.group(1)} 位推荐人及推荐信安排"
+    if action_type in {"ielts", "toefl"}:
+        score = re.search(
+            rf"\b{action_type}\b[^\d]{{0,24}}(\d+(?:\.\d+)?)",
+            text,
+            re.IGNORECASE,
+        )
+        if score:
+            return f"取得满足项目要求的 {action_type.upper()} {score.group(1)} 成绩"
+    return PLANNING_ACTION_TITLES[action_type]
+
+
 def validate_action_plan(
-    draft: DeepSeekActionPlanOutput,
+    plan: ActionPlan,
     all_gaps: List[GapResult],
-    selected_gaps: List[Dict[str, Any]],
     precise_deadline: Optional[date],
-) -> List[PlanningAction]:
-    all_by_id = {gap.requirement_id: gap for gap in all_gaps}
-    selected_by_id = {gap["requirement_id"]: gap for gap in selected_gaps}
-    action_ids = [action.action_id for action in draft.actions]
-    if len(action_ids) != len(set(action_ids)):
-        raise HTTPException(status_code=502, detail="DeepSeek Action Plan contains duplicate action_id values")
-
-    for action in draft.actions:
-        source = all_by_id.get(action.source_gap_id)
-        selected = selected_by_id.get(action.source_gap_id)
-        if source is None or selected is None:
-            raise HTTPException(status_code=502, detail=f"Action references unknown Gap: {action.source_gap_id}")
-        if source.status == "met":
-            raise HTTPException(status_code=502, detail=f"Action must not be generated for met Gap: {action.source_gap_id}")
-        if action.action_kind != selected["selected_action_kind"]:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Action kind violates code selector for Gap: {action.source_gap_id}",
-            )
-        if selected["conditional_confirmation_only"] and action.action_kind != "confirm_information":
-            raise HTTPException(
-                status_code=502,
-                detail=f"Conditional Gap requires confirmation first: {action.source_gap_id}",
-            )
-        if action.target_date:
-            target = precise_calendar_date(action.target_date)
-            if target is None:
-                raise HTTPException(status_code=502, detail=f"Action target_date is not ISO date: {action.action_id}")
-            if precise_deadline is None:
-                raise HTTPException(status_code=502, detail=f"Action invented a precise date without a precise Deadline: {action.action_id}")
-            if target > precise_deadline:
-                raise HTTPException(status_code=502, detail=f"Action target_date exceeds Application Deadline: {action.action_id}")
-        if precise_deadline is None and re.search(r"\b\d{4}-\d{2}-\d{2}\b", action.time_period):
-            raise HTTPException(status_code=502, detail=f"Action time_period invented a precise date: {action.action_id}")
-        if any(dependency not in action_ids for dependency in action.depends_on):
-            raise HTTPException(status_code=502, detail=f"Action has an unknown dependency: {action.action_id}")
-
-    required_gap_ids = {
-        gap["requirement_id"]
-        for gap in selected_gaps
-        if gap["requirement_type"] == "required" and gap["plan_track"] == "main"
-    }
-    covered_gap_ids = {action.source_gap_id for action in draft.actions}
-    missing_required = sorted(required_gap_ids - covered_gap_ids)
-    if missing_required:
-        raise HTTPException(
-            status_code=502,
-            detail=f"DeepSeek Action Plan omitted required Gaps: {', '.join(missing_required)}",
-        )
-
-    actions = [
-        PlanningAction(
-            **action.model_dump(),
-            priority=selected_by_id[action.source_gap_id]["priority"],
-            requirement_type=selected_by_id[action.source_gap_id]["requirement_type"],
-            plan_track=selected_by_id[action.source_gap_id]["plan_track"],
-        )
-        for action in draft.actions
-    ]
-    track_by_action_id = {action.action_id: action.plan_track for action in actions}
-    for action in actions:
-        if action.plan_track == "main" and any(
-            track_by_action_id[dependency] == "optional"
-            for dependency in action.depends_on
-        ):
-            raise HTTPException(
-                status_code=502,
-                detail=f"Main-plan action depends on an optional action: {action.action_id}",
-            )
-    return actions
+    today: date,
+) -> None:
+    """Validate the code-owned Planning contract; no model contract is involved."""
+    gaps_by_id = {gap.requirement_id: gap for gap in all_gaps}
+    action_gap_ids = [action.source_gap_id for action in plan.actions]
+    if len(action_gap_ids) != len(set(action_gap_ids)):
+        raise ValueError("one source_gap_id may produce at most one action")
+    all_item_ids = (
+        action_gap_ids
+        + [item.source_gap_id for item in plan.needs_confirmation]
+        + [item.source_gap_id for item in plan.eligibility_risks]
+    )
+    if len(all_item_ids) != len(set(all_item_ids)):
+        raise ValueError("a Gap may belong to only one Planning disposition")
+    for gap_id in all_item_ids:
+        if gap_id not in gaps_by_id or gaps_by_id[gap_id].status == "met":
+            raise ValueError(f"invalid Planning source Gap: {gap_id}")
+    for item in plan.needs_confirmation:
+        classification = planning_actionability(gaps_by_id[item.source_gap_id])
+        if classification["disposition"] != "confirmation" or item.target_date is not None:
+            raise ValueError(f"invalid confirmation item: {item.source_gap_id}")
+    for item in plan.eligibility_risks:
+        if planning_actionability(gaps_by_id[item.source_gap_id])["disposition"] != "eligibility_risk":
+            raise ValueError(f"invalid eligibility risk: {item.source_gap_id}")
+    for action in plan.actions:
+        classification = planning_actionability(gaps_by_id[action.source_gap_id])
+        if classification["disposition"] != "action":
+            raise ValueError(f"non-actionable Gap produced an action: {action.source_gap_id}")
+        if action.action_kind != classification["selected_action_kind"]:
+            raise ValueError(f"code-owned action kind mismatch: {action.source_gap_id}")
+        if precise_deadline is None:
+            if action.target_date is not None or action.timing_status != "priority_only":
+                raise ValueError("actions without a reliable Deadline must be priority-only")
+        elif action.timing_status == "urgent":
+            if action.target_date is not None:
+                raise ValueError("urgent actions must not expose a past target date")
+        else:
+            target = precise_calendar_date(action.target_date or "")
+            if target is None or target < today or target > precise_deadline:
+                raise ValueError("scheduled target_date must be current/future and no later than Deadline")
+    if [action.priority_order for action in plan.actions] != list(range(1, len(plan.actions) + 1)):
+        raise ValueError("Planning priority_order must be contiguous and deterministic")
+    if precise_deadline is not None:
+        seen_scheduled = False
+        dated: List[date] = []
+        for action in plan.actions:
+            if action.timing_status == "urgent":
+                if seen_scheduled:
+                    raise ValueError("urgent actions must sort before scheduled actions")
+            else:
+                seen_scheduled = True
+                dated.append(date.fromisoformat(action.target_date or ""))
+        if dated != sorted(dated):
+            raise ValueError("scheduled actions must sort by target_date")
 
 
 def apply_selected_action_kinds(
     content: DeepSeekActionPlanContent,
     selected_gaps: List[Dict[str, Any]],
 ) -> DeepSeekActionPlanOutput:
+    """Legacy Planning-LLM adapter retained only for old fixture compatibility."""
     selected_by_id = {gap["requirement_id"]: gap for gap in selected_gaps}
     actions: List[PlanningActionDraft] = []
     for action in content.actions:
@@ -10371,7 +11043,6 @@ async def build_action_plan(
     deadline_text, deadline_label, exact_deadline = planning_deadline(
         request.application_timeline
     )
-    ready_by = planning_ready_by(exact_deadline, today) if exact_deadline else None
     selected_gaps = select_planning_gaps(request.gap_analysis.results)
     common = {
         "target_program": request.target_program,
@@ -10381,70 +11052,112 @@ async def build_action_plan(
         "application_deadline": deadline_text,
         "application_deadline_label": deadline_label,
         "deadline_is_precise": exact_deadline is not None,
-        "ready_by_date": ready_by.isoformat() if ready_by else None,
+        "ready_by_date": None,
+        "planning_llm_requests": 0,
     }
     if not selected_gaps:
-        return ActionPlan(**common, actions=[], planning_llm_requests=0)
+        return ActionPlan(**common)
 
-    date_rule = (
-        f"The official hard Application Deadline is {deadline_text}. The internal ready-by "
-        f"date is {ready_by.isoformat() if ready_by else 'not available'}; schedule core "
-        "materials to be substantially complete by ready-by and never date an action after "
-        "the Deadline."
-        if exact_deadline
-        else (
-            f"The official Deadline is only the non-precise text {deadline_text!r}. Do not "
-            "invent a calendar date; use time phases and set every target_date to null."
-            if deadline_text
-            else "No official Deadline was found. Use sequence/stage labels only, set every target_date to null, and do not invent dates."
+    needs_confirmation: List[PlanningConfirmationItem] = []
+    eligibility_risks: List[PlanningEligibilityRisk] = []
+    action_rows: List[Dict[str, Any]] = []
+    gaps_by_id = {gap.requirement_id: gap for gap in request.gap_analysis.results}
+    for selected in selected_gaps:
+        gap = gaps_by_id[selected["requirement_id"]]
+        if selected["disposition"] == "confirmation":
+            needs_confirmation.append(
+                PlanningConfirmationItem(
+                    source_gap_id=gap.requirement_id,
+                    title=f"确认：{planning_requirement_title(gap)}",
+                    reason=(
+                        "当前信息不足，需要尽快确认后再决定后续行动。"
+                        if gap.status == "unknown"
+                        else "该 required Gap 的可行动性无法由现有明确规则确定，需要进一步确认。"
+                    ),
+                )
+            )
+            continue
+        if selected["disposition"] == "eligibility_risk":
+            eligibility_risks.append(
+                PlanningEligibilityRisk(
+                    source_gap_id=gap.requirement_id,
+                    title=planning_requirement_title(gap),
+                    reason="该项可能构成当前申请周期的资格风险，建议确认是否存在例外政策或考虑替代项目。",
+                )
+            )
+            continue
+
+        buffer_weeks = int(selected["buffer_weeks"])
+        target = exact_deadline - timedelta(weeks=buffer_weeks) if exact_deadline else None
+        urgent = target is not None and target < today
+        action_rows.append(
+            {
+                "source_gap_id": gap.requirement_id,
+                "action_type": selected["action_type"],
+                "action_kind": selected["selected_action_kind"],
+                "buffer_weeks": buffer_weeks,
+                "target": None if urgent else target,
+                "timing_status": (
+                    "urgent" if urgent else "scheduled" if exact_deadline else "priority_only"
+                ),
+                "gap": gap,
+            }
         )
+
+    if exact_deadline:
+        action_rows.sort(
+            key=lambda row: (
+                0 if row["timing_status"] == "urgent" else 1,
+                row["target"] or date.max,
+                row["source_gap_id"],
+            )
+        )
+    else:
+        action_rows.sort(key=lambda row: (-row["buffer_weeks"], row["source_gap_id"]))
+
+    actions: List[PlanningAction] = []
+    for priority_order, row in enumerate(action_rows, start=1):
+        target = row["target"]
+        timing_status: PlanningTimingStatus = row["timing_status"]
+        reason = (
+            "当前剩余时间已低于建议准备周期，建议立即处理。"
+            if timing_status == "urgent"
+            else f"按 {row['buffer_weeks']} 周建议准备周期安排；{row['gap'].reason}"
+        )
+        actions.append(
+            PlanningAction(
+                action_id=f"planning:{row['source_gap_id']}",
+                action=planning_action_title(row["action_type"], row["gap"]),
+                action_kind=row["action_kind"],
+                time_period=(
+                    "立即处理"
+                    if timing_status == "urgent"
+                    else target.isoformat()
+                    if target
+                    else f"优先 {priority_order}"
+                ),
+                target_date=target.isoformat() if target else None,
+                source_gap_id=row["source_gap_id"],
+                reason=reason,
+                status="pending",
+                depends_on=[],
+                parallel_group=None,
+                priority="high" if priority_order <= 3 else "medium",
+                requirement_type="required",
+                plan_track="main",
+                priority_order=priority_order,
+                timing_status=timing_status,
+            )
+        )
+
+    plan = ActionPlan(
+        **common,
+        needs_confirmation=sorted(needs_confirmation, key=lambda item: item.source_gap_id),
+        eligibility_risks=sorted(eligibility_risks, key=lambda item: item.source_gap_id),
+        actions=actions,
     )
-    prompt = (
-        "You are an application-level milestone planner. Convert only the code-selected Gaps "
-        "below into concrete actions. Do not retrieve or reinterpret Requirements and do not "
-        "change Gap status. Code has already determined selected_action_kind for each Gap. "
-        "Do not output, choose, or change action_kind. Use selected_action_kind only to align "
-        "the action content: complete_gap fills a partial Gap, resolve_gap solves a not_met "
-        "Gap, and confirm_information confirms an unknown or conditional Gap. For a conditional Gap "
-        "marked conditional_confirmation_only, create only a low-cost confirmation action; "
-        "never create remediation before applicability is confirmed.\n\n"
-        "Use application-level milestones, not daily checklists. Split only genuinely long "
-        "work into a few meaningful milestones. For language, normally use preparation, first "
-        "test, retake buffer, and final score. For essays, use materials, first draft, feedback, "
-        "and final. For recommendations, use recommender confirmation, materials, and submission "
-        "follow-up. Keep simple tasks simple. Determine dependencies, parallel work, and sensible "
-        "time phases. Main actions must never depend on optional actions. Return at least one "
-        "action for every required selected Gap. Recommended/preferred items are optional "
-        "enhancements and must not block the main plan.\n\n"
-        f"Current date: {today.isoformat()}. {date_rule}\n\n"
-        f"Timeline: {request.application_timeline.model_dump_json()}\n"
-        f"Code-selected Gaps: {json.dumps(selected_gaps, ensure_ascii=False)}\n"
-        f"Output JSON Schema: {json.dumps(DeepSeekActionPlanContent.model_json_schema(), ensure_ascii=False)}\n"
-        "Return only the complete JSON object."
-    )
-    content = await call_deepseek(
-        messages=[
-            {"role": "system", "content": "Return only a structured application Action Plan without tools."},
-            {"role": "user", "content": prompt},
-        ],
-        max_tokens=5000,
-        response_format={"type": "json_object"},
-    )
-    try:
-        model_content = DeepSeekActionPlanContent.model_validate_json(content)
-    except ValidationError as error:
-        raise HTTPException(
-            status_code=502,
-            detail=f"DeepSeek returned an invalid Action Plan: {error}",
-        ) from error
-    draft = apply_selected_action_kinds(model_content, selected_gaps)
-    actions = validate_action_plan(
-        draft,
-        request.gap_analysis.results,
-        selected_gaps,
-        exact_deadline,
-    )
-    return ActionPlan(**common, actions=actions)
+    validate_action_plan(plan, request.gap_analysis.results, exact_deadline, today)
+    return plan
 
 
 @app.post("/planning/plan", response_model=ActionPlan, tags=["planning"])

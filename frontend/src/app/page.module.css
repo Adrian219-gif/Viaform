@@ -415,6 +415,13 @@
 .actionPlanMeta span { color:#75827c; font-size:9px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
 .actionPlanMeta strong { color:#29443a; font-size:14px; }
 .actionPlanMeta small { color:#8a7460; font-size:10px; }
+.planningDisposition { margin-bottom:18px; padding:18px 20px; display:grid; gap:10px; border:1px solid #dbe4df; border-radius:14px; background:#fff; }
+.planningDisposition>strong { color:#315347; font-size:12px; }
+.planningDisposition article { padding-top:10px; border-top:1px solid #edf1ef; }
+.planningDisposition h2 { color:#273a32; font-size:13px; }
+.planningDisposition p { margin-top:5px; color:#718078; font-size:11px; line-height:1.6; }
+.planningRisk { border-color:#ead9b5; background:#fffaf0; }
+.planningRisk>strong { color:#806019; }
 .unifiedTimeline { display:grid; gap:28px; }
 .actionPeriod { display:grid; grid-template-columns:150px 1fr; gap:24px; }
 .actionPeriodLabel { position:relative; padding-top:16px; display:flex; align-items:flex-start; gap:10px; color:#315347; }

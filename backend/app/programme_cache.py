@@ -22,6 +22,14 @@ CacheSource = Literal["live", "runtime_cache", "seed"]
 CACHE_TTL = timedelta(days=7)
 PROGRAMME_POOL_TTL = timedelta(days=180)
 SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSIONS: Dict[CacheKind, int] = {
+    "requirements": 2,
+    "timeline": 1,
+}
+
+
+def cache_schema_version(kind: CacheKind) -> int:
+    return CACHE_SCHEMA_VERSIONS[kind]
 
 
 def _normalize_text(value: Optional[str]) -> str:
@@ -171,6 +179,7 @@ class ProgrammeCache:
                 cache_kind TEXT NOT NULL,
                 cache_key TEXT NOT NULL,
                 semantic_key TEXT,
+                cache_schema_version INTEGER NOT NULL DEFAULT 1,
                 checked_at TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
                 PRIMARY KEY (cache_kind, cache_key)
@@ -183,6 +192,11 @@ class ProgrammeCache:
         }
         if "semantic_key" not in cache_columns:
             connection.execute("ALTER TABLE programme_cache ADD COLUMN semantic_key TEXT")
+        if "cache_schema_version" not in cache_columns:
+            connection.execute(
+                "ALTER TABLE programme_cache ADD COLUMN "
+                "cache_schema_version INTEGER NOT NULL DEFAULT 1"
+            )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_programme_cache_semantic "
             "ON programme_cache(cache_kind, semantic_key, checked_at)"
@@ -470,22 +484,37 @@ class ProgrammeCache:
         try:
             with self._connect() as connection:
                 row = connection.execute(
-                    "SELECT checked_at, payload_json FROM programme_cache "
+                    "SELECT checked_at, payload_json, cache_schema_version "
+                    "FROM programme_cache "
                     "WHERE cache_kind = ? AND cache_key = ?",
                     (kind, cache_key),
                 ).fetchone()
-                if (not row or not is_fresh(row[0], current)) and semantic_key:
+                if (
+                    not row
+                    or not is_fresh(row[0], current)
+                    or int(row[2]) != cache_schema_version(kind)
+                ) and semantic_key:
                     alias_rows = connection.execute(
-                        "SELECT checked_at, payload_json FROM programme_cache "
+                        "SELECT checked_at, payload_json, cache_schema_version "
+                        "FROM programme_cache "
                         "WHERE cache_kind = ? AND semantic_key = ? "
                         "ORDER BY checked_at DESC",
                         (kind, semantic_key),
                     ).fetchall()
                     row = next(
-                        (candidate for candidate in alias_rows if is_fresh(candidate[0], current)),
+                        (
+                            candidate
+                            for candidate in alias_rows
+                            if is_fresh(candidate[0], current)
+                            and int(candidate[2]) == cache_schema_version(kind)
+                        ),
                         None,
                     )
-            if not row or not is_fresh(row[0], current):
+            if (
+                not row
+                or not is_fresh(row[0], current)
+                or int(row[2]) != cache_schema_version(kind)
+            ):
                 return None
             payload = json.loads(row[1])
             if not isinstance(payload, dict):
@@ -515,6 +544,8 @@ class ProgrammeCache:
             snapshot = document.get(kind)
             if not isinstance(snapshot, dict):
                 return None
+            if snapshot.get("cache_schema_version", 1) != cache_schema_version(kind):
+                return None
             checked_at = snapshot.get("checked_at")
             payload = snapshot.get("payload")
             if not isinstance(checked_at, str) or not isinstance(payload, dict):
@@ -540,15 +571,24 @@ class ProgrammeCache:
             connection.execute(
                 """
                 INSERT INTO programme_cache (
-                    cache_kind, cache_key, semantic_key, checked_at, payload_json
+                    cache_kind, cache_key, semantic_key, cache_schema_version,
+                    checked_at, payload_json
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(cache_kind, cache_key) DO UPDATE SET
                     semantic_key = excluded.semantic_key,
+                    cache_schema_version = excluded.cache_schema_version,
                     checked_at = excluded.checked_at,
                     payload_json = excluded.payload_json
                 """,
-                (kind, cache_key, semantic_key, checked_at, serialized),
+                (
+                    kind,
+                    cache_key,
+                    semantic_key,
+                    cache_schema_version(kind),
+                    checked_at,
+                    serialized,
+                ),
             )
 
     def export_runtime_to_seed(
@@ -578,7 +618,11 @@ class ProgrammeCache:
                 "schema_version": SCHEMA_VERSION,
                 "cache_key": cache_key,
                 "identity": identity,
-                kind: {"checked_at": row[0], "payload": payload},
+                kind: {
+                    "cache_schema_version": cache_schema_version(kind),
+                    "checked_at": row[0],
+                    "payload": payload,
+                },
             }
         )
         temporary = path.with_suffix(".json.tmp")

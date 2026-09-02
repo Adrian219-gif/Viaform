@@ -242,6 +242,7 @@ async def check_canonical_equivalent_requirements_hit(root: Path) -> None:
             CREATE TABLE programme_cache (
                 cache_kind TEXT NOT NULL,
                 cache_key TEXT NOT NULL,
+                cache_schema_version INTEGER NOT NULL DEFAULT 1,
                 checked_at TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
                 PRIMARY KEY (cache_kind, cache_key)
@@ -250,10 +251,11 @@ async def check_canonical_equivalent_requirements_hit(root: Path) -> None:
         )
         legacy_review = requirements_fixture(old_target)
         connection.execute(
-            "INSERT INTO programme_cache VALUES (?, ?, ?, ?)",
+            "INSERT INTO programme_cache VALUES (?, ?, ?, ?, ?)",
             (
                 "requirements",
                 old_cache_key,
+                2,
                 legacy_review.checked_at,
                 legacy_review.model_dump_json(),
             ),

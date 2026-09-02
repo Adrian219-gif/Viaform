@@ -6,6 +6,7 @@ import styles from "./SpecialRequirementInterview.module.css";
 type Availability = "known" | "known_negative" | "unknown";
 
 export type SpecialInterviewCourse = {
+  item_id: string;
   prerequisite_kind: "concrete_course" | "course_category";
   canonical_label: string | null;
   category_label: string | null;
@@ -23,6 +24,21 @@ export type SpecialInterviewSource = {
 };
 
 export type SpecialInterviewPlan = {
+  authoritative_prerequisite_plan: {
+    group_id: string;
+    requirement_id: string;
+    relation: "all_of" | "one_of";
+    items: {
+      item_id: string;
+      prerequisite_kind: "concrete_course" | "course_category";
+      canonical_label: string | null;
+      category_label: string | null;
+      display_label: string;
+      course_code: string | null;
+      minimum_courses: number | null;
+      evidence_key: string;
+    }[];
+  }[];
   prerequisite_groups: {
     group_id: string;
     relation: "all_of" | "one_of";
@@ -46,6 +62,7 @@ export type SpecialInterviewPlan = {
 
 export type SpecialInterviewSubmission = {
   evidence_key: string;
+  item_id?: string | null;
   canonical_label: string;
   item_type: "prerequisite_course" | "objective_special";
   prerequisite_kind?: "concrete_course" | "course_category" | null;
@@ -128,6 +145,7 @@ export default function SpecialRequirementInterview({
         if (!availability) return;
         submissions.push({
           evidence_key: course.evidence_key,
+          item_id: course.item_id,
           canonical_label: course.canonical_label || course.category_label || "",
           item_type: "prerequisite_course",
           prerequisite_kind: course.prerequisite_kind,
