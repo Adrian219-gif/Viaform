@@ -7,6 +7,29 @@
 __pycache__/
 *.py[cod]
 
+# Editor and operating-system metadata.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and temporary working files.
+*.log
+logs/
+tmp/
+temp/
+
+# Local environments and generated coverage data.
+.venv/
+venv/
+coverage/
+
+# Local certificates and private-key material.
+*.pem
+*.key
+*.p12
+*.pfx
+
 # Runtime programme cache (tracked seed snapshots live under backend/data/seed).
 backend/data/runtime/*.sqlite
 backend/data/runtime/*.sqlite-wal
