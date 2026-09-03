@@ -1,4 +1,4 @@
-# UniversityApplyPlan（知途留学）
+# UniversityApplyPlan（Viaform）
 
 > AI-assisted study-abroad application planning prototype that turns a student's background and target programme requirements into a structured gap analysis and actionable plan.
 
