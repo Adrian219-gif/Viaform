@@ -4,6 +4,36 @@
 
 这是一个面向中国留学生的留学申请规划 MVP。它将用户背景、院校与项目发现、申请要求、差距判断和行动计划组织成一条结构化流程，而不是一次性的通用 LLM 问答。
 
+## Product Demo
+
+Viaform turns a user’s application background into a structured, deadline-aware application plan.
+
+![Viaform landing page](docs/assets/demo/01-landing.png)
+
+### 1. Discover target programmes
+
+![Viaform programme discovery](docs/assets/demo/02-programme-discovery.png)
+
+Filter universities and programmes based on destination, subject, and ranking preferences.
+
+### 2. Verify official requirements and timeline
+
+![Viaform requirements and timeline](docs/assets/demo/03-requirements-timeline.png)
+
+Retrieve programme-level requirements and the relevant application-cycle timeline from official sources.
+
+### 3. Identify application gaps
+
+![Viaform Gap Analysis](docs/assets/demo/04-gap-analysis.png)
+
+Compare the user profile against programme requirements and separate met, partial, unmet, and unknown items.
+
+### 4. Turn gaps into an action plan
+
+![Viaform Action Plan](docs/assets/demo/05-action-plan.png)
+
+Convert identified gaps into deadline-aware actions while separating eligibility risks and items that still need confirmation.
+
 ## 项目解决什么问题
 
 目标项目官网信息分散且会随申请周期变化。申请人往往难以判断自己的背景是否满足要求、还缺哪些材料或资格条件，以及应该优先准备什么。本项目将这些判断组织为可追踪的结构化工作流。

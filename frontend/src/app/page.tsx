@@ -2,6 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import styles from "./page.module.css";
+import LandingPage from "@/features/landing/LandingPage";
 import StandardProfileInterview from "@/features/standard-profile/StandardProfileInterview";
 import { EMPTY_STANDARD_PROFILE, StandardUserProfile } from "@/features/standard-profile/profile";
 import { CachedProfileStatus, profileEntryView as profileEntryViewForStatus, readStandardProfileCache, writeStandardProfileCache } from "@/features/standard-profile/profile-cache";
@@ -276,6 +277,7 @@ function OverallRankingValue({ university }: { university: CandidateUniversity }
 }
 
 export default function Home() {
+  const [showLanding, setShowLanding] = useState(true);
   const [profile, setProfile] = useState<UserProfile>(EMPTY_PROFILE);
   const [profileHydrated, setProfileHydrated] = useState(false);
   const [profileEntryView, setProfileEntryView] = useState<"interview" | "summary" | "incomplete">("interview");
@@ -1329,7 +1331,11 @@ export default function Home() {
   }, [additionalPreferences, countries, discoverUniversities, rankingBasis, rankingMax, rankingMin, selectedSubject, selectedSubjectId, subjectUncertain, targetMajor, targetStep]);
 
   if (!profileHydrated) {
-    return <main className={styles.page}><header className={styles.header}><div className={styles.brand}><span className={styles.brandMark}>知</span><span>知途留学</span></div><span className={styles.status}>正在读取背景信息…</span></header></main>;
+    return <main className={styles.page}><header className={styles.header}><div className={styles.brand}>Viaform</div><span className={styles.status}>正在读取背景信息…</span></header></main>;
+  }
+
+  if (showLanding) {
+    return <LandingPage onStart={() => setShowLanding(false)} />;
   }
 
   function persistReusableEvidence(nextEvidence: UserEvidence[]) {
@@ -1340,7 +1346,7 @@ export default function Home() {
   if (showProfile && targetStep) {
     return (
       <main className={`${styles.page} ${styles.targetPage}`}>
-        <header className={styles.header}><div className={styles.brand}><span className={styles.brandMark}>知</span><span>知途留学</span></div><span className={styles.status}>{targetStep === "planning" ? "06 · Planning Workflow" : targetStep === "gap_results" ? "05 · Gap Table" : targetStep === "special_interview" ? "04 · 项目特殊要求" : targetStep === "requirements" ? "03 · 申请要求分析" : targetStep === "entry_cycle" ? "02 · 目标申请周期" : "02 · 目标院校与申请范围"}</span></header>
+        <header className={styles.header}><div className={styles.brand}>Viaform</div><span className={styles.status}>{targetStep === "planning" ? "06 · Planning Workflow" : targetStep === "gap_results" ? "05 · Gap Table" : targetStep === "special_interview" ? "04 · 项目特殊要求" : targetStep === "requirements" ? "03 · 申请要求分析" : targetStep === "entry_cycle" ? "02 · 目标申请周期" : "02 · 目标院校与申请范围"}</span></header>
         <section className={styles.targetShell}>
           <div className={styles.moduleProgress}><span className={profileStatus === "completed" ? styles.moduleDone : styles.moduleSkipped}>{profileStatus === "completed" ? "✓ 基础信息" : "基础信息已跳过"}</span><i /><span className={targetStep === "explore" || targetStep === "entry_cycle" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "explore" ? "2 目标范围" : targetStep === "entry_cycle" ? "2 申请周期" : "✓ 目标项目"}</span>{targetStep !== "explore" && targetStep !== "entry_cycle" && <><i /><span className={targetStep === "requirements" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "requirements" ? "3 要求确认" : "✓ 要求确认"}</span></>}{(targetStep === "special_interview" || targetStep === "gap_results" || targetStep === "planning") && <><i /><span className={targetStep === "special_interview" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "special_interview" ? "4 项目特殊要求" : "✓ 项目特殊要求"}</span></>}{(targetStep === "gap_results" || targetStep === "planning") && <><i /><span className={targetStep === "gap_results" ? styles.moduleCurrent : styles.moduleDone}>{targetStep === "gap_results" ? "5 Gap Table" : "✓ Gap Table"}</span></>}{targetStep === "planning" && <><i /><span className={styles.moduleCurrent}>6 行动计划</span></>}</div>
 
@@ -1464,9 +1470,9 @@ export default function Home() {
             <div className={styles.gapInterviewMeta}><span>还需补充 <strong>{Math.max(gapPlan.questions.length - gapQuestionIndex, 0)}</strong> 项信息</span><span>已复用 {gapPlan.reusable_evidence.length} 项已有证据</span></div>
             <div className={styles.gapChat}>
               <div className={styles.messages} aria-live="polite">
-                {gapTurns.map((turn, index) => <div key={`${turn.question}-${index}`}><div className={styles.assistantRow}><div className={styles.miniAvatar}>知</div><p>{turn.question}</p></div><div className={styles.userRow}><p>{turn.answer}</p></div></div>)}
-                {!isAnalyzingGap && gapPlan.questions[gapQuestionIndex] && <div className={styles.assistantRow}><div className={styles.miniAvatar}>知</div><p>{displayedGapQuestion(gapPlan.questions[gapQuestionIndex])}</p></div>}
-                {isAnalyzingGap && <div className={`${styles.assistantRow} ${styles.thinkingRow}`}><div className={styles.miniAvatar}>知</div><p><span>●</span><span>●</span><span>●</span> 正在生成 Gap Table</p></div>}
+                {gapTurns.map((turn, index) => <div key={`${turn.question}-${index}`}><div className={styles.assistantRow}><div className={styles.miniAvatar} aria-hidden="true" /><p>{turn.question}</p></div><div className={styles.userRow}><p>{turn.answer}</p></div></div>)}
+                {!isAnalyzingGap && gapPlan.questions[gapQuestionIndex] && <div className={styles.assistantRow}><div className={styles.miniAvatar} aria-hidden="true" /><p>{displayedGapQuestion(gapPlan.questions[gapQuestionIndex])}</p></div>}
+                {isAnalyzingGap && <div className={`${styles.assistantRow} ${styles.thinkingRow}`}><div className={styles.miniAvatar} aria-hidden="true" /><p><span>●</span><span>●</span><span>●</span> 正在生成 Gap Table</p></div>}
                 {gapError && <div className={styles.inlineError}>{gapError}</div>}
               </div>
               {gapPlan.questions[gapQuestionIndex] && renderStructuredGapControl(gapPlan.questions[gapQuestionIndex])}

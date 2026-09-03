@@ -1,0 +1,33 @@
+.landing { color:var(--color-text-primary); background:var(--color-background); font-family:var(--font-sans); }
+.header { position:sticky; top:0; z-index:10; width:min(1320px,calc(100% - 64px)); height:88px; margin:0 auto; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--color-border); background:color-mix(in srgb,var(--color-background) 90%,transparent); backdrop-filter:blur(14px); }
+.brand { color:var(--color-text-primary); font-size:18px; font-weight:780; letter-spacing:-.02em; }
+.header nav { display:flex; align-items:center; gap:40px; color:var(--color-text-secondary); font-size:14px; }
+.header nav a { transition:color .2s ease; }
+.header nav a:hover { color:var(--color-primary); }
+.headerCta { min-height:44px; padding:0 18px; display:inline-flex; align-items:center; gap:14px; border:1px solid var(--color-primary); border-radius:var(--radius-pill); color:var(--color-primary); background:transparent; font:inherit; font-size:13px; font-weight:700; cursor:pointer; }
+.headerCta span { font-size:14px; }
+.hero { min-height:730px; padding:146px 24px 126px; display:flex; flex-direction:column; align-items:center; text-align:center; }
+.eyebrow { color:var(--color-primary); font-size:12px; font-weight:800; letter-spacing:.2em; }
+.hero h1 { max-width:1160px; margin-top:30px; font-size:clamp(64px,8.2vw,110px); line-height:1.02; font-weight:720; letter-spacing:-.06em; }
+.hero h1 em { display:block; margin-top:12px; color:var(--color-text-accent); font-family:"Noto Serif SC","Songti SC",STSong,SimSun,serif; font-style:normal; font-weight:400; letter-spacing:-.045em; }
+.heroCopy { max-width:700px; margin-top:34px; color:var(--color-text-secondary); font-size:18px; line-height:1.85; }
+.primaryCta { min-height:56px; margin-top:38px; padding:0 21px 0 27px; display:inline-flex; align-items:center; gap:34px; border:0; border-radius:var(--radius-pill); color:#fff; background:var(--color-primary); font:inherit; font-size:14px; font-weight:750; cursor:pointer; box-shadow:var(--shadow-button); transition:transform .2s ease,background .2s ease; }
+.primaryCta:hover { transform:translateY(-2px); background:var(--color-primary-hover); }
+.primaryCta span { width:28px; height:28px; display:grid; place-items:center; border-radius:50%; color:var(--color-primary); background:#fff; }
+.workflow,.preview { width:min(1120px,calc(100% - 48px)); margin:0 auto; }
+.workflow { padding:122px 0 132px; border-top:1px solid var(--color-border); }
+.sectionHeading { max-width:580px; }
+.sectionHeading h2 { margin-top:16px; font-size:clamp(34px,4.5vw,54px); line-height:1.15; font-weight:650; letter-spacing:-.04em; }
+.stepGrid { margin-top:72px; display:grid; grid-template-columns:repeat(3,1fr); }
+.stepGrid article { min-height:250px; padding:10px 46px 12px 0; }
+.stepGrid article+article { padding-left:46px; border-left:1px solid var(--color-border-strong); }
+.stepGrid article:last-child { padding-right:0; }
+.stepGrid article>span { display:block; color:var(--color-primary); font-family:var(--font-serif); font-size:62px; line-height:1; font-weight:400; letter-spacing:-.06em; }
+.stepGrid h3 { margin-top:54px; font-size:21px; }
+.stepGrid p { max-width:270px; margin-top:14px; color:var(--color-text-secondary); font-size:14px; line-height:1.8; }
+.preview { padding:150px 0 158px; border-top:1px solid var(--color-border); }
+.preview h2 { max-width:920px; margin-top:24px; font-size:clamp(54px,7vw,90px); line-height:1.08; font-weight:650; letter-spacing:-.055em; }
+.preview>p:last-child { max-width:660px; margin:36px 0 0 auto; color:var(--color-text-secondary); font-size:17px; line-height:1.9; }
+.footer { width:min(1120px,calc(100% - 48px)); margin:0 auto; padding:32px 0 38px; border-top:1px solid var(--color-border); color:var(--color-text-muted); font-size:12px; font-weight:700; }
+@media (max-width:760px) { .header { width:calc(100% - 32px); height:76px; justify-content:flex-end; }.header nav { display:none; }.hero { min-height:auto; padding:96px 20px 88px; }.hero h1 { font-size:clamp(46px,13vw,66px); }.heroCopy { font-size:16px; }.stepGrid { grid-template-columns:1fr; }.stepGrid article { min-height:auto; padding:28px 0 42px; }.stepGrid article+article { padding-left:0; border-top:1px solid var(--color-border-strong); border-left:0; }.stepGrid h3 { margin-top:28px; }.workflow,.preview { width:min(100% - 32px,1120px); }.preview { padding:96px 0 104px; }.preview h2 { font-size:clamp(44px,12vw,62px); }.preview>p:last-child { margin-left:0; font-size:15px; }.footer { width:calc(100% - 32px); }}
+@media (max-width:760px) { .header { justify-content:space-between; } }
