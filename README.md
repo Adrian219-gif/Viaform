@@ -116,6 +116,18 @@ python dev.py
 
 AI is used for search and semantic tasks, while deterministic code handles stable workflow and business rules.
 
+## 模型选型
+
+当前 MVP 使用 DeepSeek API。
+
+选型时主要考虑：
+
+- **能力**：能够满足当前结构化信息抽取、要求整理和有限语义判断等核心任务；
+- **成本**：在 MVP 存在多次模型调用的情况下，API 成本更符合当前开发阶段的预算约束；
+- **可用性与延迟**：面向国内使用环境，API 接入更直接，网络访问与服务可用性方面的不确定性更低。
+
+当前尚未进行系统性的多模型 benchmark，因此这里代表的是 MVP 阶段基于能力、成本和运行环境做出的工程与产品选型，而不是证明 DeepSeek 在所有候选模型中最优。
+
 ## Project Structure
 
 ```text
@@ -143,3 +155,4 @@ dev.py         Frontend + Backend 本地启动入口
 - AI 整理结果不等于独立事实验证；正式申请前应以目标申请周期的学校官网为准。
 - 当前 Action Plan 主要处理 required Gap，不做持续动态更新，optional / preferred 要求暂不进入主计划。
 - 当前支持浏览器 `localStorage` Profile persistence 和 Backend retrieval cache，但没有服务端用户账号、认证 Profile 或跨设备同步。
+- 当前模型层仅完成 DeepSeek API 的实际开发与验证，尚未验证其他模型提供商的兼容性。
