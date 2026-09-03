@@ -327,6 +327,7 @@ def run() -> None:
     passed.append("30 extraction still has no question")
 
     assert "course_category" in prompt and "minimum_courses" in prompt and "绝不能把整句话" in prompt
+    assert "aggregate_course_credits" in prompt and "required_quantity" in prompt
     passed.append("31 targeted prompt defines category granularity")
 
     assert len(passed) == 31

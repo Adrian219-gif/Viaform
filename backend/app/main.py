@@ -126,6 +126,7 @@ class StandardizedTest(BaseModel):
 class ApplicationMaterials(BaseModel):
     cv_status: Optional[Literal["prepared", "not_prepared", "unknown", "not_applicable"]] = None
     transcript_status: Optional[Literal["prepared", "not_prepared", "unknown", "not_applicable"]] = None
+    degree_certificate_status: Optional[Literal["prepared", "not_prepared", "unknown", "not_applicable"]] = None
     motivation_letter_status: Optional[Literal["prepared", "not_prepared", "unknown", "not_applicable"]] = None
     portfolio_status: Optional[Literal["prepared", "not_prepared", "unknown", "not_applicable"]] = None
     confirmed_recommenders: Optional[int] = Field(default=None, ge=0)
@@ -587,6 +588,15 @@ class AuthoritativePrerequisiteGroup(BaseModel):
     requirement_id: str = Field(min_length=1)
     relation: Literal["all_of", "one_of"]
     items: List[AuthoritativePrerequisiteItem] = Field(min_length=1)
+
+
+class AuthoritativeCourseCreditItem(BaseModel):
+    item_id: str = Field(min_length=1)
+    requirement_id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    required_quantity: float = Field(ge=0)
+    unit: str = Field(min_length=1)
+    evidence_key: str = Field(min_length=1)
 
 
 ConditionalPredicateOperator = Literal["equals", "in"]
@@ -1104,6 +1114,9 @@ class GapPlanRequest(BaseModel):
     authoritative_prerequisite_plan: List[AuthoritativePrerequisiteGroup] = Field(
         default_factory=list
     )
+    authoritative_course_credit_plan: List[AuthoritativeCourseCreditItem] = Field(
+        default_factory=list
+    )
 
 
 SpecialPrerequisiteRelation = Literal["all_of", "one_of"]
@@ -1145,11 +1158,26 @@ class SpecialObjectiveRequirementExtraction(BaseModel):
     expected_answer_type: SpecialExpectedAnswerType = "ternary"
 
 
+class SpecialAggregateCourseCreditExtraction(BaseModel):
+    requirement_id: str = Field(min_length=1)
+    required_quantity: float = Field(ge=0)
+    unit: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+
+    @field_validator("requirement_id", "unit", "label", mode="before")
+    @classmethod
+    def normalize_required_text(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+
 class SpecialTargetedExtractionOutput(BaseModel):
     prerequisite_groups: List[SpecialPrerequisiteGroupExtraction] = Field(
         default_factory=list
     )
     objective_special_requirements: List[SpecialObjectiveRequirementExtraction] = Field(
+        default_factory=list
+    )
+    aggregate_course_credits: List[SpecialAggregateCourseCreditExtraction] = Field(
         default_factory=list
     )
 
@@ -1188,6 +1216,10 @@ class SpecialInterviewObjectiveItem(BaseModel):
     source: SpecialInterviewSource
 
 
+class SpecialInterviewAggregateCreditItem(AuthoritativeCourseCreditItem):
+    source: SpecialInterviewSource
+
+
 class SpecialInterviewPlanRequest(BaseModel):
     target_program: TargetProgram
     requirements_review: TargetProgramRequirementsReview
@@ -1200,6 +1232,12 @@ class SpecialInterviewPlan(BaseModel):
         default_factory=list
     )
     authoritative_prerequisite_plan: List[AuthoritativePrerequisiteGroup] = Field(
+        default_factory=list
+    )
+    aggregate_course_credits: List[SpecialInterviewAggregateCreditItem] = Field(
+        default_factory=list
+    )
+    authoritative_course_credit_plan: List[AuthoritativeCourseCreditItem] = Field(
         default_factory=list
     )
     objective_special_requirements: List[SpecialInterviewObjectiveItem] = Field(
@@ -1216,13 +1254,33 @@ class SpecialInterviewAnswer(BaseModel):
     evidence_key: str = Field(min_length=1)
     item_id: Optional[str] = None
     canonical_label: str = Field(min_length=1)
-    item_type: Literal["prerequisite_course", "objective_special"]
+    item_type: Literal[
+        "prerequisite_course", "objective_special", "aggregate_course_credit"
+    ]
     prerequisite_kind: Optional[Literal["concrete_course", "course_category"]] = None
     minimum_courses: Optional[int] = Field(default=None, ge=1)
     availability: EvidenceAvailability
     requirement_id: str = Field(min_length=1)
     user_course_name: Optional[str] = None
     user_course_names: List[str] = Field(default_factory=list)
+    quantity: Optional[float] = Field(default=None, ge=0)
+    unit: Optional[str] = None
+    required_quantity: Optional[float] = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_aggregate_credit_answer(self) -> "SpecialInterviewAnswer":
+        if self.item_type != "aggregate_course_credit":
+            return self
+        if self.availability == "known_negative":
+            raise ValueError("aggregate course credit does not support known_negative")
+        if not self.unit or not self.unit.strip() or self.required_quantity is None:
+            raise ValueError("aggregate course credit metadata is required")
+        self.unit = self.unit.strip()
+        if self.availability == "known" and self.quantity is None:
+            raise ValueError("known aggregate course credit requires quantity")
+        if self.availability == "unknown":
+            self.quantity = None
+        return self
 
 
 class SpecialInterviewEvidenceSubmitRequest(BaseModel):
@@ -3568,6 +3626,7 @@ def profile_user_evidence(profile: UserProfile) -> List[UserEvidence]:
     material_statuses = (
         ("materials.cv", profile.materials.cv_status),
         ("materials.transcript", profile.materials.transcript_status),
+        ("materials.degree_certificate", profile.materials.degree_certificate_status),
         ("materials.personal_statement", profile.materials.motivation_letter_status),
         ("materials.portfolio", profile.materials.portfolio_status),
     )
@@ -4398,6 +4457,42 @@ def authoritative_gap_course_requirements(
                     group_relation=group.relation,
                 )
             )
+    return normalized
+
+
+def authoritative_gap_course_credit_items(
+    target_program: TargetProgram,
+    requirement_id: str,
+    items: List[AuthoritativeCourseCreditItem],
+) -> List[AuthoritativeCourseCreditItem]:
+    normalized: List[AuthoritativeCourseCreditItem] = []
+    seen_item_ids: Set[str] = set()
+    for item in items:
+        if item.requirement_id != requirement_id:
+            continue
+        expected_item_id = authoritative_course_credit_item_id(
+            requirement_id,
+            item.required_quantity,
+            item.unit,
+        )
+        expected_key = programme_course_credit_evidence_key(
+            target_program,
+            requirement_id,
+            expected_item_id,
+        )
+        if item.item_id != expected_item_id or canonical_evidence_key(
+            item.evidence_key
+        ) != expected_key:
+            logger.warning(
+                "authoritative_course_credit_invalid requirement_id=%s item_id=%s dropped=true",
+                requirement_id,
+                item.item_id,
+            )
+            continue
+        if item.item_id in seen_item_ids:
+            continue
+        seen_item_ids.add(item.item_id)
+        normalized.append(item.model_copy(update={"evidence_key": expected_key}))
     return normalized
 
 
@@ -5330,6 +5425,10 @@ def gap_planner_prompt_payload(
         "authoritative_prerequisite_plan": [
             group.model_dump()
             for group in request.authoritative_prerequisite_plan
+        ],
+        "authoritative_course_credit_plan": [
+            item.model_dump()
+            for item in request.authoritative_course_credit_plan
         ],
         "canonical_user_evidence": [
             {
@@ -6812,6 +6911,38 @@ def programme_course_evidence_key(
     return f"programme_course_response:{programme_scope}:{requirement_scope}:{item_id}"
 
 
+def authoritative_course_credit_item_id(
+    requirement_id: str,
+    required_quantity: float,
+    unit: str,
+) -> str:
+    normalized = "\n".join(
+        [
+            requirement_id.strip().casefold(),
+            f"{required_quantity:g}",
+            " ".join(unicodedata.normalize("NFKC", unit).casefold().split()),
+        ]
+    )
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    return f"course-credit-{digest}"
+
+
+def programme_course_credit_evidence_key(
+    target_program: TargetProgram,
+    requirement_id: str,
+    item_id: str,
+) -> str:
+    identity = target_program_cache_identity(target_program)
+    programme_scope = programme_cache_key(identity)[:20]
+    requirement_scope = hashlib.sha256(
+        requirement_id.strip().casefold().encode("utf-8")
+    ).hexdigest()[:12]
+    return (
+        f"programme_course_credit_response:{programme_scope}:"
+        f"{requirement_scope}:{item_id}"
+    )
+
+
 def gap_course_item_evidence_key(item: GapCourseRequirement) -> str:
     return (
         canonical_evidence_key(item.evidence_key)
@@ -6954,6 +7085,7 @@ def parse_special_targeted_extraction(content: str) -> SpecialTargetedExtraction
         )
     groups: List[SpecialPrerequisiteGroupExtraction] = []
     specials: List[SpecialObjectiveRequirementExtraction] = []
+    aggregate_credits: List[SpecialAggregateCourseCreditExtraction] = []
     for raw_group in payload.get("prerequisite_groups", []):
         try:
             groups.append(SpecialPrerequisiteGroupExtraction.model_validate(raw_group))
@@ -6970,9 +7102,20 @@ def parse_special_targeted_extraction(content: str) -> SpecialTargetedExtraction
                 "special_interview_malformed_objective_item dropped=true errors=%s",
                 error.error_count(),
             )
+    for raw_item in payload.get("aggregate_course_credits", []):
+        try:
+            aggregate_credits.append(
+                SpecialAggregateCourseCreditExtraction.model_validate(raw_item)
+            )
+        except ValidationError as error:
+            logger.warning(
+                "special_interview_malformed_aggregate_credit dropped=true errors=%s",
+                error.error_count(),
+            )
     return SpecialTargetedExtractionOutput(
         prerequisite_groups=groups,
         objective_special_requirements=specials,
+        aggregate_course_credits=aggregate_credits,
     )
 
 
@@ -7004,8 +7147,18 @@ async def extract_special_requirements_once(
         "Systems courses）输出 course_category + category_label=Systems，绝不能把整句话当作"
         "课程名。只有 Requirement 明确写出数量时才输出 minimum_courses，例如 one from=1、"
         "at least two=2；不得猜测数量。只抽取明确必修课程/类别；example/such as/recommended "
-        "不得升级为必修，不得自行补课程。主观的 related "
-        "discipline、relevant experience、strong/suitable background 不输出。学费、deadline、"
+        "不得升级为必修，不得自行补课程。如果 Requirement 用 must include、required courses "
+        "are、或 mandatory 语境下的 including 明确逐项点名课程，则每个名称必须分别输出 "
+        "concrete_course，relation=all_of；即使同一句还写了 four/three different subjects "
+        "或 broad subject area，也绝不能压缩成一个 course_category + minimum_courses。只有"
+        "没有逐项列出 mandatory course names 的真正类别要求才使用 course_category。主观的 related "
+        "discipline、relevant experience、strong/suitable background 不输出。"
+        "如果同一课程 Requirement 明确写出合计课程学分门槛（例如 totalling 22.5 ECTS、"
+        "at least 28.5 credits），必须同时输出一个 aggregate_course_credits item："
+        "requirement_id 引用当前 Requirement，required_quantity 和 unit 只取原文明示值，"
+        "label 简洁描述该 Requirement 的相关课程总学分范围。具体课程与 aggregate total 是"
+        "两个独立事实；不得把总学分塞进某一门具体课程，也不得输出每门课程学分。"
+        "学费、deadline、"
         "open date、intake、duration、round、行政信息不输出。objective special 的 "
         "expected_answer_type 只允许 ternary；例如明确要求的 certificate、undergraduate "
         "thesis 或其他客观 programme-specific prerequisite。模型只返回 requirement_id、"
@@ -7034,6 +7187,98 @@ async def extract_special_requirements_once(
     return parse_special_targeted_extraction(result.content)
 
 
+def explicit_mandatory_course_names(
+    requirement_text: str,
+    *,
+    expected_count: int,
+) -> List[str]:
+    """Recover an explicit mandatory list when extraction collapsed it to a category.
+
+    This is deliberately narrow: the source must contain a mandatory-list marker and
+    the number of independently named courses must exactly match the model-provided
+    category count. Examples and recommendations are never promoted.
+    """
+    text = " ".join(requirement_text.split())
+    if expected_count < 2 or re.search(
+        r"\b(?:examples?|such as|including but not limited to|recommended)\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return []
+    marker = re.search(
+        r"\b(?:must\s+include|required\s+courses?\s+(?:are|include)|"
+        r"(?:must|required)[^.;:]{0,80}\bincluding|including)\b\s*:?\s*",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if marker is None:
+        return []
+    # Bare "including" is accepted only when the same requirement establishes a
+    # required/count constraint. This keeps descriptive example lists out.
+    marker_text = marker.group(0).casefold()
+    if marker_text.strip().startswith("including") and not re.search(
+        r"\b(?:must|required|shall|different\s+(?:subjects?|courses?))\b",
+        text[: marker.start()],
+        flags=re.IGNORECASE,
+    ):
+        return []
+    tail = re.split(r"[.;]", text[marker.end() :], maxsplit=1)[0].strip()
+    if not tail:
+        return []
+    raw_names = re.split(r"\s*,\s*", tail)
+    if len(raw_names) == 1 and "/" in tail:
+        raw_names = re.split(r"\s*/\s*", tail)
+    names: List[str] = []
+    for raw_name in raw_names:
+        name = re.sub(r"^(?:and|or)\s+", "", raw_name, flags=re.IGNORECASE)
+        name = re.sub(
+            r"^(?:an?\s+)?(?:in-depth\s+)?course\s+(?:in|on|covering)\s+",
+            "",
+            name,
+            flags=re.IGNORECASE,
+        ).strip(" ,:")
+        if not name or re.search(r"\b(?:ECTS|credits?|subjects?)\b", name, re.IGNORECASE):
+            return []
+        names.append(name)
+    if len(names) != expected_count or len({name.casefold() for name in names}) != len(names):
+        return []
+    return names
+
+
+def normalize_collapsed_named_course_group(
+    group: SpecialPrerequisiteGroupExtraction,
+    requirement_text: str,
+) -> SpecialPrerequisiteGroupExtraction:
+    if len(group.courses) != 1:
+        return group
+    collapsed = group.courses[0]
+    if collapsed.prerequisite_kind != "course_category" or collapsed.minimum_courses is None:
+        return group
+    names = explicit_mandatory_course_names(
+        requirement_text,
+        expected_count=collapsed.minimum_courses,
+    )
+    if not names:
+        return group
+    logger.warning(
+        "special_interview_named_courses_expanded requirement_id=%s count=%s",
+        group.requirement_id,
+        len(names),
+    )
+    return group.model_copy(
+        update={
+            "relation": "all_of",
+            "courses": [
+                SpecialPrerequisiteCourseExtraction(
+                    prerequisite_kind="concrete_course",
+                    canonical_label=name,
+                )
+                for name in names
+            ],
+        }
+    )
+
+
 def build_special_interview_plan_from_extraction(
     request: SpecialInterviewPlanRequest,
     trusted_requirements: List[Dict[str, Any]],
@@ -7050,6 +7295,8 @@ def build_special_interview_plan_from_extraction(
     }
     groups: List[SpecialInterviewPrerequisiteGroup] = []
     authoritative_groups: List[AuthoritativePrerequisiteGroup] = []
+    aggregate_credits: List[SpecialInterviewAggregateCreditItem] = []
+    authoritative_credit_items: List[AuthoritativeCourseCreditItem] = []
     seen_groups: Set[tuple[str, str, tuple[str, ...]]] = set()
     extracted_count = 0
     for group in extraction.prerequisite_groups:
@@ -7060,6 +7307,7 @@ def build_special_interview_plan_from_extraction(
                 group.requirement_id,
             )
             continue
+        group = normalize_collapsed_named_course_group(group, source["requirement"])
         authoritative_items: List[AuthoritativePrerequisiteItem] = []
         seen_item_ids: Set[str] = set()
         for course in group.courses:
@@ -7187,11 +7435,68 @@ def build_special_interview_plan_from_extraction(
                 ),
             )
         )
-    remaining_count = sum(len(group.courses) for group in groups) + len(specials)
+    seen_credit_items: Set[tuple[str, float, str]] = set()
+    for item in extraction.aggregate_course_credits:
+        source = sources.get(item.requirement_id)
+        if source is None:
+            logger.warning(
+                "special_interview_unknown_requirement_id requirement_id=%s dropped=true",
+                item.requirement_id,
+            )
+            continue
+        signature = (
+            item.requirement_id,
+            item.required_quantity,
+            " ".join(item.unit.casefold().split()),
+        )
+        if signature in seen_credit_items:
+            continue
+        seen_credit_items.add(signature)
+        item_id = authoritative_course_credit_item_id(
+            item.requirement_id,
+            item.required_quantity,
+            item.unit,
+        )
+        evidence_key = programme_course_credit_evidence_key(
+            request.target_program,
+            item.requirement_id,
+            item_id,
+        )
+        authoritative_item = AuthoritativeCourseCreditItem(
+            item_id=item_id,
+            requirement_id=item.requirement_id,
+            label=item.label,
+            required_quantity=item.required_quantity,
+            unit=item.unit,
+            evidence_key=evidence_key,
+        )
+        authoritative_credit_items.append(authoritative_item)
+        extracted_count += 1
+        if evidence_key in reusable_by_key:
+            continue
+        aggregate_credits.append(
+            SpecialInterviewAggregateCreditItem(
+                **authoritative_item.model_dump(),
+                source=SpecialInterviewSource(
+                    requirement_id=item.requirement_id,
+                    requirement=source["requirement"],
+                    requirement_zh=source.get("requirement_zh"),
+                    source_url=source.get("source_url"),
+                    verification_status=source["verification_status"],
+                ),
+            )
+        )
+    remaining_count = (
+        sum(len(group.courses) for group in groups)
+        + len(specials)
+        + len(aggregate_credits)
+    )
     return SpecialInterviewPlan(
         target_program=request.target_program,
         prerequisite_groups=groups,
         authoritative_prerequisite_plan=authoritative_groups,
+        aggregate_course_credits=aggregate_credits,
+        authoritative_course_credit_plan=authoritative_credit_items,
         objective_special_requirements=specials,
         reusable_evidence=list(reusable_by_key.values()),
         trusted_requirement_count=len(trusted_requirements),
@@ -7244,20 +7549,36 @@ async def special_interview_evidence_submit_endpoint(
             and answer.prerequisite_kind is not None
             else None
         )
+        if answer.item_type == "aggregate_course_credit":
+            expected_item_id = authoritative_course_credit_item_id(
+                answer.requirement_id,
+                answer.required_quantity or 0,
+                answer.unit or "",
+            )
         if (
             answer.item_type == "prerequisite_course"
             and answer.item_id != expected_item_id
         ):
             raise HTTPException(status_code=422, detail="Invalid prerequisite item id")
-        expected_key = (
-            programme_course_evidence_key(
+        if (
+            answer.item_type == "aggregate_course_credit"
+            and answer.item_id != expected_item_id
+        ):
+            raise HTTPException(status_code=422, detail="Invalid aggregate credit item id")
+        if answer.item_type == "prerequisite_course":
+            expected_key = programme_course_evidence_key(
                 request.target_program,
                 answer.requirement_id,
                 expected_item_id or "",
             )
-            if answer.item_type == "prerequisite_course"
-            else special_evidence_key(answer.item_type, answer.canonical_label)
-        )
+        elif answer.item_type == "aggregate_course_credit":
+            expected_key = programme_course_credit_evidence_key(
+                request.target_program,
+                answer.requirement_id,
+                expected_item_id or "",
+            )
+        else:
+            expected_key = special_evidence_key(answer.item_type, answer.canonical_label)
         if canonical_evidence_key(answer.evidence_key) != expected_key:
             raise HTTPException(status_code=422, detail="Invalid special evidence key")
         cleaned_course_names = list(
@@ -7310,11 +7631,35 @@ async def special_interview_evidence_submit_endpoint(
                     "reusable": False,
                 }
             )
+        elif answer.item_type == "aggregate_course_credit":
+            value = (
+                CourseCreditEvidenceValue(
+                    requirement_id=answer.requirement_id,
+                    label=answer.canonical_label.strip(),
+                    quantity=answer.quantity,
+                    unit=answer.unit or "",
+                ).model_dump()
+                if answer.availability == "known"
+                else {
+                    "requirement_id": answer.requirement_id,
+                    "label": answer.canonical_label.strip(),
+                    "quantity": None,
+                    "unit": answer.unit,
+                }
+            )
+            value.update({
+                "item_id": expected_item_id,
+                "required_quantity": answer.required_quantity,
+                "aggregate_scope": "requirement",
+                "reusable": False,
+            })
         evidence.append(
             UserEvidence(
                 evidence_type=(
                     "prerequisite_course"
                     if answer.item_type == "prerequisite_course"
+                    else "courses"
+                    if answer.item_type == "aggregate_course_credit"
                     else "generic"
                 ),
                 key=expected_key,
@@ -7323,7 +7668,13 @@ async def special_interview_evidence_submit_endpoint(
                     "known": "修过" if answer.item_type == "prerequisite_course" else "持有/符合",
                     "known_negative": "没修过" if answer.item_type == "prerequisite_course" else "没有",
                     "unknown": "不确定",
-                }[answer.availability],
+                }[answer.availability]
+                if answer.item_type != "aggregate_course_credit"
+                else (
+                    f"{answer.quantity:g} {answer.unit}"
+                    if answer.availability == "known" and answer.quantity is not None
+                    else "不确定"
+                ),
                 availability=answer.availability,
                 updated_at=now,
                 source_requirement_ids=[answer.requirement_id],
@@ -7449,6 +7800,10 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
         "threshold 是两个独立事实：总量继续放在 course_credit constraint；如果只写某领域共"
         "22.5 ECTS 而没有明确课程清单，course_requirements 必须是空数组。"
         "course_requirements 不得包含 UI、checklist 或 question text。\n"
+        "输入若包含 authoritative_course_credit_plan，其中的 requirement-scoped evidence_key、"
+        "required_quantity 和 unit 是 aggregate course-credit 的权威结构；不得改成全局"
+        "courses.total_credits，也不得把一个 Requirement 的总学分 key 用于另一个 Requirement。"
+        "Backend 会注入并校验该 course_credit constraint；模型不得创建重复 aggregate item。\n"
         "每条 Requirement 还必须输出 conditional metadata：is_conditional、condition_text、"
         "controlling_evidence_keys、predicate_relation、predicates。只有原文明示 if selecting、"
         "applicants from、where applicable、"
@@ -7904,6 +8259,12 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
             group.requirement_id == requirement_id
             for group in request.authoritative_prerequisite_plan
         )
+        authoritative_credit_items = authoritative_gap_course_credit_items(
+            request.target_program,
+            requirement_id,
+            request.authoritative_course_credit_plan,
+        )
+        has_authoritative_credit_plan = bool(authoritative_credit_items)
         if has_authoritative_course_plan:
             if item.course_requirements:
                 logger.warning(
@@ -7916,11 +8277,23 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
                 requirement_id,
                 request.authoritative_prerequisite_plan,
             )
-            authoritative_credit_options = [
-                option
-                for option in normalized_constraint.options
-                if (option.kind or normalized_constraint.kind) == "course_credit"
-            ]
+            authoritative_credit_options = (
+                [
+                    GapConstraintOption(
+                        key=credit_item.evidence_key,
+                        kind="course_credit",
+                        required_quantity=credit_item.required_quantity,
+                        unit=credit_item.unit,
+                    )
+                    for credit_item in authoritative_credit_items
+                ]
+                if has_authoritative_credit_plan
+                else [
+                    option
+                    for option in normalized_constraint.options
+                    if (option.kind or normalized_constraint.kind) == "course_credit"
+                ]
+            )
             normalized_constraint = normalized_constraint.model_copy(
                 update={
                     "kind": (
@@ -7946,6 +8319,33 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
                 item.course_requirements,
                 normalized_needs,
             )
+            if has_authoritative_credit_plan:
+                non_credit_options = [
+                    option
+                    for option in normalized_constraint.options
+                    if (option.kind or normalized_constraint.kind) != "course_credit"
+                ]
+                authoritative_credit_options = [
+                    GapConstraintOption(
+                        key=credit_item.evidence_key,
+                        kind="course_credit",
+                        required_quantity=credit_item.required_quantity,
+                        unit=credit_item.unit,
+                    )
+                    for credit_item in authoritative_credit_items
+                ]
+                all_options = [*non_credit_options, *authoritative_credit_options]
+                normalized_constraint = normalized_constraint.model_copy(
+                    update={
+                        "kind": (
+                            "course_credit"
+                            if all_options and not non_credit_options
+                            else "none"
+                        ),
+                        "options": all_options,
+                        "relation": "all",
+                    }
+                )
         course_item_source_keys = {
             course_item.evidence_key
             for course_item in normalized_course_requirements
@@ -7961,13 +8361,32 @@ async def build_gap_plan(request: GapPlanRequest) -> GapPlan:
             for need in normalized_needs
             if (
                 (
-                    not has_authoritative_course_plan
+                    not (has_authoritative_course_plan or has_authoritative_credit_plan)
                     and need.key not in course_item_source_keys
                 )
                 or need.key in course_credit_keys
                 or need.evidence_type != "courses"
             )
         ]
+        for credit_item in authoritative_credit_items:
+            credit_need = GapEvidenceNeed(
+                key=credit_item.evidence_key,
+                evidence_type="courses",
+                value_kind="numeric",
+                label=credit_item.label,
+                required_fields=["quantity"],
+                evidence_group=requirement_id,
+                group_relation="all",
+                required_quantity=credit_item.required_quantity,
+                unit=credit_item.unit,
+            )
+            reusable_credit = reusable_by_key.get(credit_need.key)
+            credit_need.already_known = bool(
+                reusable_credit
+                and evidence_is_terminal_for_need(credit_need, reusable_credit)
+            )
+            if all(need.key != credit_need.key for need in normalized_needs):
+                normalized_needs.append(credit_need)
         for course_item in normalized_course_requirements:
             course_item_label = (
                 f"{course_item.group_label} — {course_item.course_name}"

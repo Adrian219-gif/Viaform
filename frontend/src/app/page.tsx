@@ -561,6 +561,7 @@ export default function Home() {
   async function runExistingGapPlan(
     evidence: UserEvidence[],
     prerequisitePlan: SpecialInterviewPlan["authoritative_prerequisite_plan"] = specialInterviewPlan?.authoritative_prerequisite_plan ?? [],
+    courseCreditPlan: SpecialInterviewPlan["authoritative_course_credit_plan"] = specialInterviewPlan?.authoritative_course_credit_plan ?? [],
   ) {
     if (!activeTargetProgram || !requirementsReview) return;
     const response = await fetch(`${API_BASE_URL}/gap/plan`, {
@@ -572,6 +573,7 @@ export default function Home() {
           user_profile: profile,
           user_evidence: evidence,
           authoritative_prerequisite_plan: prerequisitePlan,
+          authoritative_course_credit_plan: courseCreditPlan,
         }),
       });
     const data = await response.json();
@@ -611,7 +613,11 @@ export default function Home() {
       if (nextStepAfterSpecialExtraction(plan.remaining_item_count) === "special_interview") {
         setTargetStep("special_interview");
       } else {
-        await runExistingGapPlan(userEvidence, plan.authoritative_prerequisite_plan);
+        await runExistingGapPlan(
+          userEvidence,
+          plan.authoritative_prerequisite_plan,
+          plan.authoritative_course_credit_plan,
+        );
       }
     } catch (error) {
       setGapError(error instanceof Error ? error.message : "匹配分析生成失败，请重新尝试。");
@@ -637,6 +643,7 @@ export default function Home() {
       await runExistingGapPlan(
         nextEvidence,
         specialInterviewPlan?.authoritative_prerequisite_plan ?? [],
+        specialInterviewPlan?.authoritative_course_credit_plan ?? [],
       );
     } catch (error) {
       setGapError(error instanceof Error ? error.message : "暂时无法保存这些背景信息，请重试。");
@@ -747,6 +754,7 @@ export default function Home() {
             user_profile: profile,
             user_evidence: nextEvidence,
             authoritative_prerequisite_plan: specialInterviewPlan?.authoritative_prerequisite_plan ?? [],
+            authoritative_course_credit_plan: specialInterviewPlan?.authoritative_course_credit_plan ?? [],
           }),
         });
         const data = await response.json();

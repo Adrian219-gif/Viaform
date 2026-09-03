@@ -21,6 +21,9 @@
 .options button.selected { border-color: #17765b; background: #17765b; color: #fff; }
 .items label, .courseNameFields { display: grid; gap: 7px; margin-top: 14px; color: #4e655d; }
 .items input { padding: 11px 12px; border: 1px solid #c8d8d1; border-radius: 9px; background: #fff; }
+.courseNameFields button { width: fit-content; padding: 9px 16px; border: 1px solid #c8d8d1; border-radius: 999px; background: #fff; color: #36554b; cursor: pointer; }
+.courseNameFields button.selected { border-color: #17765b; background: #17765b; color: #fff; }
+.itemIncomplete { color: #b84242; font-weight: 650; }
 .items label small { color: #71827c; line-height: 1.5; }
 .footer { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; padding: 18px 40px; border-top: 1px solid #dce7e1; background: #fff; }
 .footer div { display: grid; gap: 3px; color: #26463b; }

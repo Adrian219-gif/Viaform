@@ -2,6 +2,10 @@
 
 import { useMemo, useState } from "react";
 import styles from "./SpecialRequirementInterview.module.css";
+import {
+  isCourseItemComplete,
+  specialInterviewCompletion,
+} from "./completion";
 
 type Availability = "known" | "known_negative" | "unknown";
 
@@ -39,6 +43,23 @@ export type SpecialInterviewPlan = {
       evidence_key: string;
     }[];
   }[];
+  aggregate_course_credits: {
+    item_id: string;
+    requirement_id: string;
+    label: string;
+    required_quantity: number;
+    unit: string;
+    evidence_key: string;
+    source: SpecialInterviewSource;
+  }[];
+  authoritative_course_credit_plan: {
+    item_id: string;
+    requirement_id: string;
+    label: string;
+    required_quantity: number;
+    unit: string;
+    evidence_key: string;
+  }[];
   prerequisite_groups: {
     group_id: string;
     relation: "all_of" | "one_of";
@@ -64,13 +85,16 @@ export type SpecialInterviewSubmission = {
   evidence_key: string;
   item_id?: string | null;
   canonical_label: string;
-  item_type: "prerequisite_course" | "objective_special";
+  item_type: "prerequisite_course" | "objective_special" | "aggregate_course_credit";
   prerequisite_kind?: "concrete_course" | "course_category" | null;
   minimum_courses?: number | null;
   availability: Availability;
   requirement_id: string;
   user_course_name?: string | null;
   user_course_names?: string[];
+  quantity?: number | null;
+  unit?: string | null;
+  required_quantity?: number | null;
 };
 
 type Props = {
@@ -104,11 +128,12 @@ export default function SpecialRequirementInterview({
 }: Props) {
   const [answers, setAnswers] = useState<Record<string, Availability>>({});
   const [courseNames, setCourseNames] = useState<Record<string, string[]>>({});
+  const [aggregateQuantities, setAggregateQuantities] = useState<Record<string, string>>({});
   const [validationError, setValidationError] = useState("");
 
-  const answeredCount = useMemo(
-    () => Object.keys(answers).length,
-    [answers],
+  const completion = useMemo(
+    () => specialInterviewCompletion(plan, answers, courseNames, aggregateQuantities),
+    [aggregateQuantities, answers, courseNames, plan],
   );
 
   function choose(key: string, availability: Availability) {
@@ -117,25 +142,8 @@ export default function SpecialRequirementInterview({
   }
 
   function submit() {
-    const incompleteAllOf = plan.prerequisite_groups.some(
-      (group) => group.relation === "all_of"
-        && group.courses.some((course) => !answers[course.evidence_key]),
-    );
-    const incompleteOneOf = plan.prerequisite_groups.some((group) => {
-      if (group.relation !== "one_of") return false;
-      const groupAnswers = group.courses.map((course) => answers[course.evidence_key]);
-      return !groupAnswers.includes("known") && groupAnswers.some((answer) => !answer);
-    });
-    const incompleteSpecial = plan.objective_special_requirements.some(
-      (item) => !answers[item.evidence_key],
-    );
-    const incompleteCategoryCourses = plan.prerequisite_groups.some((group) =>
-      group.courses.some((course) => course.prerequisite_kind === "course_category"
-        && answers[course.evidence_key] === "known"
-        && (courseNames[course.evidence_key] ?? []).filter((name) => name.trim()).length < (course.minimum_courses ?? 1)),
-    );
-    if (incompleteAllOf || incompleteOneOf || incompleteSpecial || incompleteCategoryCourses) {
-      setValidationError("请确认当前仍需收集的每项事实；OR 课程组满足一项后即可继续。");
+    if (!completion.canSubmit) {
+      setValidationError(completion.validationMessage);
       return;
     }
     const submissions: SpecialInterviewSubmission[] = [];
@@ -172,6 +180,23 @@ export default function SpecialRequirementInterview({
         requirement_id: item.source.requirement_id,
       });
     });
+    plan.aggregate_course_credits.forEach((item) => {
+      const availability = answers[item.evidence_key];
+      if (availability !== "known" && availability !== "unknown") return;
+      submissions.push({
+        evidence_key: item.evidence_key,
+        item_id: item.item_id,
+        canonical_label: item.label,
+        item_type: "aggregate_course_credit",
+        availability,
+        requirement_id: item.requirement_id,
+        quantity: availability === "known"
+          ? Number(aggregateQuantities[item.evidence_key])
+          : null,
+        unit: item.unit,
+        required_quantity: item.required_quantity,
+      });
+    });
     onSubmit(submissions);
   }
 
@@ -200,16 +225,48 @@ export default function SpecialRequirementInterview({
           <div className={styles.options}>{COURSE_OPTIONS.map((option) => <button type="button" key={option.value} className={answers[course.evidence_key] === option.value ? styles.selected : ""} onClick={() => choose(course.evidence_key, option.value)}>{option.label}</button>)}</div>
           {answers[course.evidence_key] === "known" && <div className={styles.courseNameFields}>
             <span>对应的本科课程名称{course.prerequisite_kind === "concrete_course" ? "（可选）" : ""}</span>
-            {Array.from({ length: requiredNames }, (_, index) => <input key={index} value={courseNames[course.evidence_key]?.[index] ?? ""} onChange={(event) => setCourseNames((current) => {
-              const next = [...(current[course.evidence_key] ?? [])];
-              next[index] = event.target.value;
-              return { ...current, [course.evidence_key]: next };
-            })} placeholder={requiredNames > 1 ? `课程 ${index + 1}` : course.prerequisite_kind === "course_category" ? "例如：Operating Systems" : "例如：Matrix Algebra"} />)}
+            {Array.from({ length: requiredNames }, (_, index) => <input key={index} value={courseNames[course.evidence_key]?.[index] ?? ""} onChange={(event) => {
+              const value = event.target.value;
+              setValidationError("");
+              setCourseNames((current) => {
+                const next = [...(current[course.evidence_key] ?? [])];
+                next[index] = value;
+                return { ...current, [course.evidence_key]: next };
+              });
+            }} placeholder={requiredNames > 1 ? `课程 ${index + 1}` : course.prerequisite_kind === "course_category" ? "例如：Operating Systems" : "例如：Matrix Algebra"} />)}
             {course.prerequisite_kind === "course_category" && course.suggested_user_courses.length > 0 && <small>你已记录的课程（仅供确认参考，不代表自动满足本类别）：{course.suggested_user_courses.join("、")}</small>}
             <small>如果课程名称与项目要求不同，建议查看本科院校官网课程描述或 syllabus，再确认课程内容是否覆盖。</small>
+            {!isCourseItemComplete(course, answers[course.evidence_key], courseNames[course.evidence_key]) && <small className={styles.itemIncomplete}>{requiredNames > 1 ? `还需填写 ${requiredNames - (courseNames[course.evidence_key] ?? []).filter((name) => name.trim()).length} 门课程名称。` : "填写课程名称后，此项才算确认完成。"}</small>}
           </div>}
         </article>})}</div>
       </section>)}
+      {plan.aggregate_course_credits.length > 0 && <section className={styles.card}>
+        <div className={styles.cardHeading}><div><span>相关课程总学分</span><h2>确认课程学分总量</h2></div></div>
+        <div className={styles.items}>{plan.aggregate_course_credits.map((item) => <article key={item.item_id}>
+          <strong>满足上述相关课程要求的课程合计多少 {item.unit}？</strong>
+          <p className={styles.sourceText}>{item.source.requirement_zh || item.source.requirement}</p>
+          <div className={styles.courseNameFields}>
+            <input type="number" min="0" step="any" value={aggregateQuantities[item.evidence_key] ?? ""} onChange={(event) => {
+              const value = event.target.value;
+              setAggregateQuantities((current) => ({ ...current, [item.evidence_key]: value }));
+              if (value.trim()) {
+                choose(item.evidence_key, "known");
+              } else {
+                setAnswers((current) => {
+                  const next = { ...current };
+                  delete next[item.evidence_key];
+                  return next;
+                });
+              }
+            }} placeholder={`例如：${item.required_quantity}`} />
+            <button type="button" className={answers[item.evidence_key] === "unknown" ? styles.selected : ""} onClick={() => {
+              setAggregateQuantities((current) => ({ ...current, [item.evidence_key]: "" }));
+              choose(item.evidence_key, "unknown");
+            }}>不确定</button>
+            {answers[item.evidence_key] !== "unknown" && !aggregateQuantities[item.evidence_key]?.trim() && <small className={styles.itemIncomplete}>填写总 {item.unit}，或选择“不确定”。</small>}
+          </div>
+        </article>)}</div>
+      </section>}
       {plan.objective_special_requirements.length > 0 && <section className={styles.card}>
         <div className={styles.cardHeading}><div><span>客观特殊要求</span><h2>确认其他项目特定事实</h2></div></div>
         <div className={styles.items}>{plan.objective_special_requirements.map((item) => <article key={item.item_id}>
@@ -219,7 +276,7 @@ export default function SpecialRequirementInterview({
       </section>}
     </main>
     <footer className={styles.footer}>
-      <div><strong>已确认 {answeredCount} / {plan.remaining_item_count}</strong><span>不确定会作为独立终态保存，不等同于没有。</span></div>
+      <div><strong>已确认 {completion.completedCount} / {plan.remaining_item_count}</strong><span>不确定会作为独立终态保存，不等同于没有。</span></div>
       <button type="button" onClick={submit} disabled={submitting}>{submitting ? "正在保存…" : "保存并进入 Gap 分析"}</button>
       {(validationError || error) && <p>{validationError || error}</p>}
     </footer>

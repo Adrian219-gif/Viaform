@@ -58,6 +58,7 @@ def run() -> None:
     positive = profile(
         cv_status="prepared",
         transcript_status="prepared",
+        degree_certificate_status="prepared",
         motivation_letter_status="prepared",
         portfolio_status="not_prepared",
         confirmed_recommenders=2,
@@ -97,6 +98,29 @@ def run() -> None:
     assert facts["materials.transcript"].value["available"] is True
     assert facts["materials.transcript"].availability == "known"
     print("PASS transcript prepared maps positive")
+
+    degree_certificate = facts["materials.degree_certificate"]
+    assert degree_certificate.value["available"] is True
+    assert degree_certificate.availability == "known"
+    assert application.evaluate_constraint_option(
+        application.GapConstraintOption(key="materials.degree_certificate"),
+        "material_boolean",
+        facts,
+        "required",
+    )[0] == "met"
+    print("PASS degree certificate prepared reaches existing material comparator")
+
+    unknown_degree_certificate = by_key(
+        profile(degree_certificate_status="unknown")
+    )["materials.degree_certificate"]
+    assert unknown_degree_certificate.availability == "unknown"
+    assert application.evaluate_constraint_option(
+        application.GapConstraintOption(key="materials.degree_certificate"),
+        "material_boolean",
+        {"materials.degree_certificate": unknown_degree_certificate},
+        "required",
+    )[0] == "unknown"
+    print("PASS degree certificate unknown remains unknown")
 
     assert facts["materials.personal_statement"].value["available"] is True
     assert facts["materials.personal_statement"].availability == "known"

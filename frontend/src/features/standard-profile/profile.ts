@@ -38,6 +38,7 @@ export type StandardUserProfile = {
   materials: {
     cv_status: MaterialStatus;
     transcript_status: MaterialStatus;
+    degree_certificate_status: MaterialStatus;
     motivation_letter_status: MaterialStatus;
     portfolio_status: MaterialStatus;
     confirmed_recommenders: number | null;
@@ -61,7 +62,7 @@ export const EMPTY_STANDARD_PROFILE: StandardUserProfile = {
   },
   standardized_test: { GRE: null, GMAT: null, GRE_status: null, GMAT_status: null },
   materials: {
-    cv_status: null, transcript_status: null, motivation_letter_status: null,
+    cv_status: null, transcript_status: null, degree_certificate_status: null, motivation_letter_status: null,
     portfolio_status: null, confirmed_recommenders: null,
   },
 };
@@ -93,6 +94,7 @@ export function profileCompleteness(profile: StandardUserProfile): ProfileIssue[
   if (profile.standardized_test.GMAT_status === "has_value" && profile.standardized_test.GMAT === null) issues.push({ key: "standardized_test.GMAT", label: "GMAT 成绩", step: 4 });
   const materialFields: Array<[keyof StandardUserProfile["materials"], string]> = [
     ["cv_status", "CV / Resume 状态"], ["transcript_status", "成绩单状态"],
+    ["degree_certificate_status", "学位证状态"],
     ["motivation_letter_status", "SOP / Personal Statement / Motivation Letter 状态"],
     ["portfolio_status", "作品集状态"],
   ];

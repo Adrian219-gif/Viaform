@@ -25,6 +25,7 @@ function completeFixture(): StandardUserProfile {
   profile.standardized_test.GMAT_status = "none";
   profile.materials.cv_status = "prepared";
   profile.materials.transcript_status = "prepared";
+  profile.materials.degree_certificate_status = "prepared";
   profile.materials.motivation_letter_status = "not_prepared";
   profile.materials.portfolio_status = "not_prepared";
   profile.materials.confirmed_recommenders = 2;
@@ -70,6 +71,7 @@ function completeFixture(): StandardUserProfile {
   const profile = completeFixture();
   assert.equal(profile.materials.confirmed_recommenders, 2);
   assert.equal(profile.materials.cv_status, "prepared");
+  assert.equal(profile.materials.degree_certificate_status, "prepared");
   assert.equal(profile.materials.portfolio_status, "not_prepared");
 }
 {
@@ -104,6 +106,31 @@ function completeFixture(): StandardUserProfile {
   assert.equal(restored?.profile.materials.cv_status, "prepared");
   assert.equal(restored?.profile.materials.confirmed_recommenders, 2);
   assert.deepEqual(restored?.profile.experience.research, ["historical research data"]);
+  assert.equal(restored?.profile.materials.degree_certificate_status, "prepared");
+}
+{
+  const storage = new MemoryStorage();
+  const legacy = completeFixture();
+  delete (legacy.materials as Partial<StandardUserProfile["materials"]>).degree_certificate_status;
+  storage.setItem(UNIFIED_PROFILE_CACHE_KEY, JSON.stringify({ version: 2, profile: legacy, profileStatus: "completed", updated_at: "2026-01-01T00:00:00Z" }));
+  const restored = readStandardProfileCache(storage);
+  assert.equal(restored?.profile.materials.degree_certificate_status, null);
+  assert(restored?.profile);
+  restored.profile.materials.degree_certificate_status = "unknown";
+  writeStandardProfileCache(storage, restored.profile, "completed");
+  assert.equal(readStandardProfileCache(storage)?.profile.materials.degree_certificate_status, "unknown");
+}
+{
+  for (const status of ["prepared", "not_prepared", "unknown"] as const) {
+    const profile = completeFixture();
+    profile.materials.degree_certificate_status = status;
+    const storage = new MemoryStorage();
+    writeStandardProfileCache(storage, profile, "completed");
+    assert.equal(readStandardProfileCache(storage)?.profile.materials.degree_certificate_status, status);
+  }
+  const profile = completeFixture();
+  profile.materials.degree_certificate_status = null;
+  assert(profileCompleteness(profile).some((issue) => issue.key === "materials.degree_certificate_status"));
 }
 {
   assert.equal(STANDARD_PROFILE_MODULE_STEPS.language, 3);
