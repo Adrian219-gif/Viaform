@@ -1,0 +1,415 @@
+{
+  "recorded_at": "2026-09-04T02:09:54.942123+00:00",
+  "results": [
+    {
+      "case": "kth",
+      "request_payload": {
+        "model": "deepseek-v4-flash",
+        "input": "Today is 2026-09-04. Retrieve admission requirements for KTH Royal Institute of Technology, Master's Programme in Computer Science, requested entry Fall 2027 (academic year 2027-28). Starting official programme URL: https://www.kth.se/en/studies/master/computer-science. Use built-in web search autonomously. Accept evidence only from kth.se or its subdomains. Return only requirements applicable to this exact programme, not nearby degrees or generic university rules without explicit programme linkage. Cover all applicable eligibility, prerequisites, tests and application materials; retain exact thresholds, quantities, alternatives, exemptions and conditions. Exclude degree-completion requirements and marketing content. For each item give its official source URL and a short supporting excerpt. Distinguish source admission cycle from the requested cycle; never silently promote previous-cycle or undated evidence to confirmed Fall 2027 rules. When evidence or applicability cannot be confirmed, report unknown explicitly, without guessing or relying on model memory. Unknown items may have null source_url; they are not accepted factual requirements. Return JSON conforming to the supplied schema.\n\n仅使用 KTH 官方来源。找到 exact programme-level page 后，自主搜索并提取当前目标申请周期的申请要求和申请材料。一旦现有官方来源已经足以覆盖主要 Requirements，就立即停止继续搜索。不要为了重复确认已经得到官方证据支持的事实继续搜索。无法确认的信息返回 unknown，不要猜测。",
+        "tools": [
+          {
+            "type": "web_search"
+          }
+        ],
+        "tool_choice": "auto",
+        "reasoning": {
+          "effort": "high"
+        },
+        "max_output_tokens": 20000,
+        "text": {
+          "format": {
+            "type": "json_schema",
+            "name": "programme_requirements",
+            "schema": {
+              "$defs": {
+                "Requirement": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "category": {
+                      "enum": [
+                        "academic",
+                        "course",
+                        "language",
+                        "standardized_test",
+                        "experience",
+                        "materials",
+                        "other"
+                      ],
+                      "title": "Category",
+                      "type": "string"
+                    },
+                    "requirement": {
+                      "title": "Requirement",
+                      "type": "string"
+                    },
+                    "importance": {
+                      "enum": [
+                        "required",
+                        "recommended",
+                        "preferred",
+                        "unknown"
+                      ],
+                      "title": "Importance",
+                      "type": "string"
+                    },
+                    "status": {
+                      "enum": [
+                        "confirmed",
+                        "unknown"
+                      ],
+                      "title": "Status",
+                      "type": "string"
+                    },
+                    "source_url": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Source Url"
+                    },
+                    "evidence_excerpt": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Evidence Excerpt"
+                    },
+                    "programme_applicability": {
+                      "enum": [
+                        "explicit_programme",
+                        "programme_linked_general",
+                        "unknown"
+                      ],
+                      "title": "Programme Applicability",
+                      "type": "string"
+                    },
+                    "source_cycle": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Source Cycle"
+                    },
+                    "temporal_applicability": {
+                      "enum": [
+                        "target_cycle_confirmed",
+                        "previous_cycle",
+                        "undated",
+                        "unknown"
+                      ],
+                      "title": "Temporal Applicability",
+                      "type": "string"
+                    },
+                    "uncertainty": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Uncertainty"
+                    }
+                  },
+                  "required": [
+                    "category",
+                    "requirement",
+                    "importance",
+                    "status",
+                    "source_url",
+                    "evidence_excerpt",
+                    "programme_applicability",
+                    "source_cycle",
+                    "temporal_applicability",
+                    "uncertainty"
+                  ],
+                  "title": "Requirement",
+                  "type": "object"
+                }
+              },
+              "additionalProperties": false,
+              "properties": {
+                "university": {
+                  "title": "University",
+                  "type": "string"
+                },
+                "programme": {
+                  "title": "Programme",
+                  "type": "string"
+                },
+                "requested_admission_cycle": {
+                  "title": "Requested Admission Cycle",
+                  "type": "string"
+                },
+                "observed_admission_cycle": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Observed Admission Cycle"
+                },
+                "cycle_status": {
+                  "enum": [
+                    "confirmed",
+                    "previous_cycle_only",
+                    "unknown"
+                  ],
+                  "title": "Cycle Status",
+                  "type": "string"
+                },
+                "requirements": {
+                  "items": {
+                    "$ref": "#/$defs/Requirement"
+                  },
+                  "title": "Requirements",
+                  "type": "array"
+                },
+                "unknowns": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "title": "Unknowns",
+                  "type": "array"
+                }
+              },
+              "required": [
+                "university",
+                "programme",
+                "requested_admission_cycle",
+                "observed_admission_cycle",
+                "cycle_status",
+                "requirements",
+                "unknowns"
+              ],
+              "title": "Requirements",
+              "type": "object"
+            }
+          }
+        }
+      },
+      "deepseek_http_requests": 1,
+      "server_model_call_count": null,
+      "web_search_call_count": null,
+      "usage": null,
+      "total_seconds": 0.148,
+      "error": "ConnectError: [WinError 10013] 以一种访问权限不允许的方式做了一个访问套接字的尝试。"
+    }
+  ],
+  "posthoc_baselines": {
+    "kth_fixture": {
+      "observed_count_reference": 15,
+      "target": {
+        "university": "KTH Royal Institute of Technology",
+        "program": "Master's Programme in Computer Science",
+        "official_program_url": "https://www.kth.se/en/studies/master/computer-science",
+        "official_domain": "www.kth.se",
+        "intended_entry_year": 2027,
+        "intended_entry_term": "fall"
+      },
+      "requirements": [
+        {
+          "category": "academic",
+          "requirement": "A bachelor's degree equivalent to a Swedish bachelor's degree of 180 ECTS is required.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "academic",
+          "requirement": "Final-year applicants may satisfy the degree documentation rules conditionally.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "conditional_admission"
+        },
+        {
+          "category": "course",
+          "requirement": "Mathematics must cover four subjects totalling 28.5 ECTS, including Calculus, Linear Algebra, Probability and Statistics, and Discrete Mathematics.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "course",
+          "requirement": "Computer Science must cover three subjects totalling 22.5 ECTS, including Object Oriented Programming, Algorithms and Data Structures, and Algorithmic Complexity.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "course",
+          "requirement": "Some compulsory track courses have additional eligibility requirements after enrolment.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "in_program"
+        },
+        {
+          "category": "language",
+          "requirement": "English 6 or Level 2 is required and may be met by IELTS 6.5, TOEFL, or eligible previous studies.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "materials",
+          "requirement": "Official degree certificates must be submitted.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "materials",
+          "requirement": "An official transcript must be submitted.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "materials",
+          "requirement": "Proof of English proficiency must be submitted.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "materials",
+          "requirement": "A passport copy or identification document must be submitted.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "materials",
+          "requirement": "A CV written in English must be submitted.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "materials",
+          "requirement": "A motivation letter in English of less than 500 words must be submitted.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "materials",
+          "requirement": "Two letters of recommendation must be submitted.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "materials",
+          "requirement": "The Computer Science summary sheet must be completed and submitted.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "other",
+          "requirement": "Applicants must pass the selection process.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        }
+      ]
+    },
+    "historical_report_sections": {
+      "kth": " FAIL\n\n- Actual result: Requirements, Timeline, Interview and Gap completed; Action Plan was rejected by the Planning Validator.\n- Failure module: End-to-End MVP Workflow\n- Failure reason: HTTPException: 502: Action kind violates code selector for Gap: materials:2\n- Baseline latency: 72.769 s\n- Baseline DeepSeek requests: 5（Web Search API 2；非 Web LLM 3）\n- Supplemental snapshot capture: 43.475 s；2 additional Web Search API requests（Requirements 24.418 s；Timeline 19.057 s）\n- Capture note: this supplemental snapshot may differ from the stochastic snapshot used by the original failed workflow; it is preserved for manual inspection only.\n- Completed phase latency before failure: `{\"requirements_seconds\": 30.886, \"timeline_seconds\": 15.974, \"interview_gap_plan_seconds\": 12.462, \"gap_analysis_seconds\": 2.046}`\n\n#",
+      "oxford": " FAIL\n\n- Actual result: Requirements, Timeline, Interview and Gap completed; Action Plan was rejected by the Planning Validator.\n- Failure module: End-to-End MVP Workflow\n- Failure reason: HTTPException: 502: Action kind violates code selector for Gap: language:1\n- Baseline latency: 86.456 s\n- Baseline DeepSeek requests: 5（Web Search API 2；非 Web LLM 3）\n- Supplemental snapshot capture: 72.541 s；2 additional Web Search API requests（Requirements 58.977 s；Timeline 13.564 s）\n- Capture note: this supplemental snapshot may differ from the stochastic snapshot used by the original failed workflow; it is preserved for manual inspection only.\n- Completed phase latency before failure: `{\"requirements_seconds\": 49.652, \"timeline_seconds\": 11.103, \"interview_gap_plan_seconds\": 10.048, \"gap_analysis_seconds\": 2.248}`\n\n#"
+    },
+    "caveat": "Oxford Biology fixture is excluded: wrong programme. Historical snapshots are not current ground truth. No fresh production workflow run; provider-internal model rounds are undisclosed."
+  }
+}

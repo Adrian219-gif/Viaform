@@ -1,0 +1,756 @@
+{
+  "recorded_at": "2026-09-04T02:11:40.765170+00:00",
+  "results": [
+    {
+      "case": "kth",
+      "request_payload": {
+        "model": "deepseek-v4-flash",
+        "input": "Today is 2026-09-04. Retrieve admission requirements for KTH Royal Institute of Technology, Master's Programme in Computer Science, requested entry Fall 2027 (academic year 2027-28). Starting official programme URL: https://www.kth.se/en/studies/master/computer-science. Use built-in web search autonomously. Accept evidence only from kth.se or its subdomains. Return only requirements applicable to this exact programme, not nearby degrees or generic university rules without explicit programme linkage. Cover all applicable eligibility, prerequisites, tests and application materials; retain exact thresholds, quantities, alternatives, exemptions and conditions. Exclude degree-completion requirements and marketing content. For each item give its official source URL and a short supporting excerpt. Distinguish source admission cycle from the requested cycle; never silently promote previous-cycle or undated evidence to confirmed Fall 2027 rules. When evidence or applicability cannot be confirmed, report unknown explicitly, without guessing or relying on model memory. Unknown items may have null source_url; they are not accepted factual requirements. Return JSON conforming to the supplied schema.\n\n仅使用 KTH 官方来源。找到 exact programme-level page 后，自主搜索并提取当前目标申请周期的申请要求和申请材料。一旦现有官方来源已经足以覆盖主要 Requirements，就立即停止继续搜索。不要为了重复确认已经得到官方证据支持的事实继续搜索。无法确认的信息返回 unknown，不要猜测。",
+        "tools": [
+          {
+            "type": "web_search"
+          }
+        ],
+        "tool_choice": "auto",
+        "reasoning": {
+          "effort": "high"
+        },
+        "max_output_tokens": 20000,
+        "text": {
+          "format": {
+            "type": "json_schema",
+            "name": "programme_requirements",
+            "schema": {
+              "$defs": {
+                "Requirement": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "category": {
+                      "enum": [
+                        "academic",
+                        "course",
+                        "language",
+                        "standardized_test",
+                        "experience",
+                        "materials",
+                        "other"
+                      ],
+                      "title": "Category",
+                      "type": "string"
+                    },
+                    "requirement": {
+                      "title": "Requirement",
+                      "type": "string"
+                    },
+                    "importance": {
+                      "enum": [
+                        "required",
+                        "recommended",
+                        "preferred",
+                        "unknown"
+                      ],
+                      "title": "Importance",
+                      "type": "string"
+                    },
+                    "status": {
+                      "enum": [
+                        "confirmed",
+                        "unknown"
+                      ],
+                      "title": "Status",
+                      "type": "string"
+                    },
+                    "source_url": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Source Url"
+                    },
+                    "evidence_excerpt": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Evidence Excerpt"
+                    },
+                    "programme_applicability": {
+                      "enum": [
+                        "explicit_programme",
+                        "programme_linked_general",
+                        "unknown"
+                      ],
+                      "title": "Programme Applicability",
+                      "type": "string"
+                    },
+                    "source_cycle": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Source Cycle"
+                    },
+                    "temporal_applicability": {
+                      "enum": [
+                        "target_cycle_confirmed",
+                        "previous_cycle",
+                        "undated",
+                        "unknown"
+                      ],
+                      "title": "Temporal Applicability",
+                      "type": "string"
+                    },
+                    "uncertainty": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Uncertainty"
+                    }
+                  },
+                  "required": [
+                    "category",
+                    "requirement",
+                    "importance",
+                    "status",
+                    "source_url",
+                    "evidence_excerpt",
+                    "programme_applicability",
+                    "source_cycle",
+                    "temporal_applicability",
+                    "uncertainty"
+                  ],
+                  "title": "Requirement",
+                  "type": "object"
+                }
+              },
+              "additionalProperties": false,
+              "properties": {
+                "university": {
+                  "title": "University",
+                  "type": "string"
+                },
+                "programme": {
+                  "title": "Programme",
+                  "type": "string"
+                },
+                "requested_admission_cycle": {
+                  "title": "Requested Admission Cycle",
+                  "type": "string"
+                },
+                "observed_admission_cycle": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Observed Admission Cycle"
+                },
+                "cycle_status": {
+                  "enum": [
+                    "confirmed",
+                    "previous_cycle_only",
+                    "unknown"
+                  ],
+                  "title": "Cycle Status",
+                  "type": "string"
+                },
+                "requirements": {
+                  "items": {
+                    "$ref": "#/$defs/Requirement"
+                  },
+                  "title": "Requirements",
+                  "type": "array"
+                },
+                "unknowns": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "title": "Unknowns",
+                  "type": "array"
+                }
+              },
+              "required": [
+                "university",
+                "programme",
+                "requested_admission_cycle",
+                "observed_admission_cycle",
+                "cycle_status",
+                "requirements",
+                "unknowns"
+              ],
+              "title": "Requirements",
+              "type": "object"
+            }
+          }
+        }
+      },
+      "deepseek_http_requests": 1,
+      "server_model_call_count": null,
+      "web_search_call_count": 8,
+      "usage": {
+        "input_tokens": 46706,
+        "input_tokens_details": {
+          "cached_tokens": 37120
+        },
+        "output_tokens": 12219,
+        "output_tokens_details": {
+          "reasoning_tokens": 7410
+        },
+        "total_tokens": 58925
+      },
+      "total_seconds": 95.605,
+      "http_status": 200,
+      "output_item_types": [
+        "reasoning",
+        "web_search_call",
+        "web_search_call",
+        "reasoning",
+        "message",
+        "web_search_call",
+        "web_search_call",
+        "reasoning",
+        "message",
+        "web_search_call",
+        "web_search_call",
+        "web_search_call",
+        "reasoning",
+        "message",
+        "web_search_call",
+        "reasoning",
+        "message"
+      ],
+      "message_content_types": [
+        [
+          "output_text"
+        ],
+        [
+          "output_text"
+        ],
+        [
+          "output_text"
+        ],
+        [
+          "output_text"
+        ]
+      ],
+      "response_id": "5d34963e-75f0-4d89-910c-66c4b175da8c",
+      "response_status": "completed",
+      "web_search_calls": [
+        {
+          "type": "web_search_call",
+          "id": "call_00_mKbmMQuXAZ5vbL4Wbs5w7582",
+          "status": "completed",
+          "action": {
+            "type": "open_page",
+            "url": "https://www.kth.se/en/studies/master/computer-science#ws_call_id=call_00_mKbmMQuXAZ5vbL4Wbs5w7582"
+          }
+        },
+        {
+          "type": "web_search_call",
+          "id": "call_01_UGNXgPhiyLYjNAQZfWR55137",
+          "status": "completed",
+          "action": {
+            "type": "search",
+            "queries": [
+              "KTH Master's Programme in Computer Science admission requirements 2027",
+              "site:kth.se computer science master admission requirements",
+              "KTH computer science master entry requirements 2027",
+              "ws_call_id=call_01_UGNXgPhiyLYjNAQZfWR55137"
+            ]
+          }
+        },
+        {
+          "type": "web_search_call",
+          "id": "call_02_geQBPoZvtwUAGSIImHJC9890",
+          "status": "completed",
+          "action": {
+            "type": "open_page",
+            "url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975#ws_call_id=call_02_geQBPoZvtwUAGSIImHJC9890"
+          }
+        },
+        {
+          "type": "web_search_call",
+          "id": "call_03_lSJ4T3khiRuccAJjgbvn6553",
+          "status": "completed",
+          "action": {
+            "type": "open_page",
+            "url": "https://www.kth.se/studies/master/computer-science/msc-computer-science-1.419974#ws_call_id=call_03_lSJ4T3khiRuccAJjgbvn6553"
+          }
+        },
+        {
+          "type": "web_search_call",
+          "id": "call_04_uGUxzWQvHNwNNdZ4HOGA8066",
+          "status": "completed",
+          "action": {
+            "type": "find_in_page",
+            "url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975#ws_call_id=call_04_uGUxzWQvHNwNNdZ4HOGA8066",
+            "pattern": "TOEFL"
+          }
+        },
+        {
+          "type": "web_search_call",
+          "id": "call_05_KzYB6g4CSHvQqt8csYhv0080",
+          "status": "completed",
+          "action": {
+            "type": "find_in_page",
+            "url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975#ws_call_id=call_05_KzYB6g4CSHvQqt8csYhv0080",
+            "pattern": "2027"
+          }
+        },
+        {
+          "type": "web_search_call",
+          "id": "call_06_CBwl40oOyOL1qeP5VcjK8663",
+          "status": "completed",
+          "action": {
+            "type": "find_in_page",
+            "url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975#ws_call_id=call_06_CBwl40oOyOL1qeP5VcjK8663",
+            "pattern": "IELTS"
+          }
+        },
+        {
+          "type": "web_search_call",
+          "id": "call_07_hilXi3HEGYWJ1F9MhfLU7742",
+          "status": "completed",
+          "action": {
+            "type": "open_page",
+            "url": "https://www.kth.se/en/studies/master/computer-science#ws_call_id=call_07_hilXi3HEGYWJ1F9MhfLU7742"
+          }
+        }
+      ],
+      "incomplete_details": null,
+      "message_texts": [
+        "Let me open the official entry requirements page for this programme.",
+        "I have the main programme page and the entry requirements page. Let me verify details on the entry requirements page (cycle reference and exact English test wording).",
+        "I now have sufficient official evidence from the KTH programme page (explicitly for the August 2027 intake) and the programme-specific entry requirements page. The entry requirements page contains all eligibility, subject prerequisites, English requirements, and application documents. I'll stop searching per the instructions.",
+        "Based on the official KTH pages I retrieved, here is the structured JSON of admission requirements for the Master's Programme in Computer Science at KTH (requested entry Fall 2027 / academic year 2027-28).\n\n```json\n{\n  \"university\": \"KTH Royal Institute of Technology\",\n  \"programme\": \"Master's Programme in Computer Science (MSc Computer Science, 120 ECTS, given in English)\",\n  \"requested_admission_cycle\": \"Fall 2027 (academic year 2027-28; studies starting August 2027)\",\n  \"observed_admission_cycle\": \"2027-28 (August 2027 intake) for the programme main page/deadlines; entry requirements page contains no explicit cycle label (undated, live content currently published for this programme)\",\n  \"cycle_status\": \"confirmed\",\n  \"requirements\": [\n    {\n      \"category\": \"academic\",\n      \"requirement\": \"Hold academic qualifications from an internationally recognised university equivalent to a Swedish bachelor's degree. Applicants in the final year of their bachelor's studies may apply. Students at universities abroad must submit documents per University Admissions instructions; students at Swedish universities must have completed 150 credits in their programme by 1 February.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Academic qualifications from an internationally recognised university equivalent to a Swedish bachelor's degree. You can meet the requirement if you are in the final year of your bachelor's studies. ... Students at Swedish universities must have completed 150 credits in their programme by 1 February per the instructions from KTH.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": \"Entry-requirements page carries no admission-cycle label; it is the live programme-specific page linked from the programme page advertising the August 2027 intake. Degree-certificate details are delegated to University Admissions.\"\n    },\n    {\n      \"category\": \"academic\",\n      \"requirement\": \"A bachelor's degree corresponding to 180 ECTS credits (or equivalent), including Mathematics: four different subjects totalling 28.5 ECTS credits. These subjects must include a course in Calculus in one variable, a course in Linear Algebra, a course in Probability Theory and Statistics, and a course in Discrete Mathematics.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"A bachelor’s degree corresponding to 180 ECTS credits, or equivalent, including courses in: - Mathematics: four different subjects with a total of 28.5 ECTS credits. These subjects must include a course in Calculus in one variable, a course in Linear Algebra, a course in Probability Theory and Statistics, and a course in Discrete Mathematics.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": \"No cycle label on source page; live page for the current (Fall 2027) admission round.\"\n    },\n    {\n      \"category\": \"academic\",\n      \"requirement\": \"A bachelor's degree corresponding to 180 ECTS credits (or equivalent), including Computer technology / Computer science and engineering / Computer science / Information technology: three different subjects totalling 22.5 ECTS credits. These subjects must include a course in Object Oriented Programming, a course in Algorithms and Data Structures, and an in-depth course in Algorithmic Complexity.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Computer technology/Computer science and engineering/Computer science/Information technology: three different subjects with a total of 22.5 ECTS credits. These subjects must include a course in Object Oriented Programming, a course in Algorithms and Data Structures and an in-depth course in Algorithmic Complexity.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": \"No cycle label on source page; live page for the current (Fall 2027) admission round.\"\n    },\n    {\n      \"category\": \"academic\",\n      \"requirement\": \"Track/course-level special eligibility: compulsory courses within certain specialisation tracks may have additional course-specific prerequisites ('Special eligibility' in the syllabus). Examples given: Multivariable analysis is a special eligibility requirement for compulsory courses within the Data analysis (Data Science) and Cognitive systems tracks; Human-computer interaction is a special entry requirement for compulsory courses within the Interaction Design track; additional prerequisites may exist for some conditionally elective or recommended courses within the tracks.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Within the programme track, there may be courses with additional requirements for special qualifications. ... Multivariable analysis is a special eligibility requirement for compulsory courses within the tracks Data analysis and Cognitive systems. Human-computer interaction is a special entry requirement for compulsory courses within the Interaction Design track. Additional prerequisites may exist for some conditionally elective or recommended courses within the tracks.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": \"Conditional prerequisites; they apply only to courses within the named specialisation tracks (not to programme admission itself), and the authoritative list is stated in each course syllabus.\"\n    },\n    {\n      \"category\": \"language\",\n      \"requirement\": \"English proficiency equivalent to the Swedish upper secondary course English 6 / English Level 2. Can be met with an English test, for example an overall IELTS score of 6.5 or (as stated on the page) a TOEFL score of 4.5; alternatively through completed upper secondary or university studies depending on the country of previous studies (per University Admissions recognised tests).\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"English proficiency equivalent to the Swedish upper secondary course English 6/English Level 2. You can meet the requirement with an English test, for example an overall IELTS score of 6.5 or a TOEFL score of 4.5. Depending on your country of previous studies you could also meet the requirement through completed upper secondary or university studies. Visit University Admissions to see all recognised English tests and what applies to your country of previous studies.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": \"The KTH page's 'TOEFL score of 4.5' wording appears anomalous and is quoted verbatim; the complete list of recognised tests and country-specific exemption rules is delegated to University Admissions (universityadmissions.se), which is outside the accepted kth.se domain, so full test thresholds cannot be confirmed from KTH sources alone.\"\n    },\n    {\n      \"category\": \"materials\",\n      \"requirement\": \"Application deadlines for the August 2027 intake: application opens 16 October 2026; 15 January (2027) last day to apply; 1 February (2027) submit documents and, if required, pay application fee; 1 April (2027) admission results announced.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science\",\n      \"evidence_excerpt\": \"Application deadlines for studies starting August 2027 - 16 October (2026): Application opens; 15 January: Last day to apply; 1 February: Submit documents and, if required, pay application fee; 1 April: Admission results announced.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Fall 2027 (August 2027 intake)\",\n      \"temporal_applicability\": \"target_cycle_confirmed\",\n      \"uncertainty\": null\n    },\n    {\n      \"category\": \"materials\",\n      \"requirement\": \"Degree certificates: official certificates of all completed degrees. Documentation requirements vary by country (per University Admissions).\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Degree certificates - Official certificates of your completed degrees. The documentation requirements vary between countries. Visit University Admissions to see what applies to your country.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": \"Country-specific documentation rules deferred to University Admissions (outside accepted kth.se domain).\"\n    },\n    {\n      \"category\": \"materials\",\n      \"requirement\": \"Transcript: official transcript of courses and grades completed in the degree. Exemption: students from Swedish universities using Ladok do not need to submit degree certificates or transcripts.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Transcript - Official transcript of courses and grades completed in your degree. Students from Swedish universities that use Ladok do not need to submit degree certificates or transcripts.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": null\n    },\n    {\n      \"category\": \"materials\",\n      \"requirement\": \"Proof of English proficiency: required; what proof is needed depends on whether the requirement is met through a test or previous studies (per University Admissions).\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Proof of English proficiency - What proof you need depends on whether you meet the requirement through a test or previous studies. Visit University Admissions to see what applies to you.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": \"Specific accepted proof forms deferred to University Admissions.\"\n    },\n    {\n      \"category\": \"materials\",\n      \"requirement\": \"Identification: a copy of passport with personal data and photograph, or other identification document.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Identification - A copy of passport with personal data and photograph, or other identification document.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": null\n    },\n    {\n      \"category\": \"materials\",\n      \"requirement\": \"CV: must clearly and concisely outline education, relevant research or work experience, extracurricular activities, qualifications and achievements (awards, publications, expertise, skills, etc.); no standard template; must be written in English.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"CV - KTH does not require a standard template, but the CV should clearly and concisely outline your education, relevant research or work experience, extracurricular activities, qualifications and achievements (awards, publications, expertise knowledge and skills, etc.). It must be written in English.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": null\n    },\n    {\n      \"category\": \"materials\",\n      \"requirement\": \"Letter of motivation: explains why you chose this programme at KTH, what you hope to gain, and how your interests and skills will help you succeed; include an autobiography on the development and relevance of your academic and professional pursuits, extra-curricular activities and related experiences. Must be in English and less than 500 words; submit one per programme, stating at the top which programme the letter applies to.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"The letter of motivation explains why you have chosen this programme at KTH ... KTH does not require a standard template, but it must be in English and less than 500 words. If you apply to multiple programmes that require a letter of motivation, you should submit one for each and state which programme each letter applies to at the top of the page.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": null\n    },\n    {\n      \"category\": \"materials\",\n      \"requirement\": \"Letters of recommendation: two letters describing why you are the right choice for admission; preferably one referee from an academic environment and one from a professional setting; same letters may be reused across KTH programmes; provide English translation if in another language; letters must include referees' full contact details; a referee submitting the letter themselves must send it by post to University Admissions stating your name and application number (not by email).\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Two letters of recommendation describing why you are the right choice for admission. Preferably, have one referee from an academic environment and one from a professional setting. ... The letters must have the referees' full contact details. If your referee wants to submit the letter themselves, they must send it by post to University Admissions and state your name and application number. They can not submit the letter via email.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": null\n    },\n    {\n      \"category\": \"materials\",\n      \"requirement\": \"Summary sheet for Computer Science: submit it via the provided link when the application opens (do not upload it to the application on universityadmissions.se); fill out all required information before submitting; an incomplete summary sheet negatively affects the evaluation score.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Submit the summary sheet for Computer Science via the link when the application opens (do not upload it to your application on universityadmissions.se). If you do not submit a complete summary sheet, it will negatively affect your evaluation score. Fill out all required information before submitting the form.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": \"Submission link only becomes available when the application opens (16 October 2026); not yet published.\"\n    },\n    {\n      \"category\": \"other\",\n      \"requirement\": \"Recognition of prior learning: if you entirely or partially lack a formal requirement for the course or programme but believe you have the necessary knowledge, you may apply for recognition of prior learning to meet the requirement.\",\n      \"importance\": \"unknown\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Suppose you entirely or partially lack a formal requirement for a course or programme, but you believe you have the necessary knowledge to meet the requirement. In that case, you can apply for recognition of prior learning.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": \"Mechanism/exemption pathway; conditions for approval not specified on this page.\"\n    }\n  ],\n  \"unknowns\": [\n    \"The programme's entry-requirements page contains no explicit admission-cycle label; its content is undated. It is the live programme-specific requirements page linked from the programme page advertising the August 2027 intake, so applicability to Fall 2027 is strongly implied but not separately cycle-confirmed on that page.\",\n    \"Exact, full list of recognised English tests and thresholds, and country-specific exemptions/conditions for meeting English 6 via previous studies, are delegated to University Admissions (universityadmissions.se), which is outside the accepted kth.se domain and could not be verified here.\",\n    \"The KTH entry-requirements page states 'a TOEFL score of 4.5' which appears anomalous on the TOEFL scale; no KTH page clarifies the intended TOEFL threshold.\",\n    \"Country-specific documentation rules for degree certificates/transcripts are delegated to University Admissions and not specified on kth.se.\",\n    \"The Computer Science summary sheet submission link is not yet published (available only once the Fall 2027 application opens on 16 October 2026).\",\n    \"Applicability and full detail of track-level 'special eligibility' course prerequisites is stated only in the respective course syllabi, not fully enumerated on the programme admission pages.\"\n  ]\n}\n```"
+      ],
+      "output_text": "Based on the official KTH pages I retrieved, here is the structured JSON of admission requirements for the Master's Programme in Computer Science at KTH (requested entry Fall 2027 / academic year 2027-28).\n\n```json\n{\n  \"university\": \"KTH Royal Institute of Technology\",\n  \"programme\": \"Master's Programme in Computer Science (MSc Computer Science, 120 ECTS, given in English)\",\n  \"requested_admission_cycle\": \"Fall 2027 (academic year 2027-28; studies starting August 2027)\",\n  \"observed_admission_cycle\": \"2027-28 (August 2027 intake) for the programme main page/deadlines; entry requirements page contains no explicit cycle label (undated, live content currently published for this programme)\",\n  \"cycle_status\": \"confirmed\",\n  \"requirements\": [\n    {\n      \"category\": \"academic\",\n      \"requirement\": \"Hold academic qualifications from an internationally recognised university equivalent to a Swedish bachelor's degree. Applicants in the final year of their bachelor's studies may apply. Students at universities abroad must submit documents per University Admissions instructions; students at Swedish universities must have completed 150 credits in their programme by 1 February.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Academic qualifications from an internationally recognised university equivalent to a Swedish bachelor's degree. You can meet the requirement if you are in the final year of your bachelor's studies. ... Students at Swedish universities must have completed 150 credits in their programme by 1 February per the instructions from KTH.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": \"Entry-requirements page carries no admission-cycle label; it is the live programme-specific page linked from the programme page advertising the August 2027 intake. Degree-certificate details are delegated to University Admissions.\"\n    },\n    {\n      \"category\": \"academic\",\n      \"requirement\": \"A bachelor's degree corresponding to 180 ECTS credits (or equivalent), including Mathematics: four different subjects totalling 28.5 ECTS credits. These subjects must include a course in Calculus in one variable, a course in Linear Algebra, a course in Probability Theory and Statistics, and a course in Discrete Mathematics.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"A bachelor’s degree corresponding to 180 ECTS credits, or equivalent, including courses in: - Mathematics: four different subjects with a total of 28.5 ECTS credits. These subjects must include a course in Calculus in one variable, a course in Linear Algebra, a course in Probability Theory and Statistics, and a course in Discrete Mathematics.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": \"No cycle label on source page; live page for the current (Fall 2027) admission round.\"\n    },\n    {\n      \"category\": \"academic\",\n      \"requirement\": \"A bachelor's degree corresponding to 180 ECTS credits (or equivalent), including Computer technology / Computer science and engineering / Computer science / Information technology: three different subjects totalling 22.5 ECTS credits. These subjects must include a course in Object Oriented Programming, a course in Algorithms and Data Structures, and an in-depth course in Algorithmic Complexity.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Computer technology/Computer science and engineering/Computer science/Information technology: three different subjects with a total of 22.5 ECTS credits. These subjects must include a course in Object Oriented Programming, a course in Algorithms and Data Structures and an in-depth course in Algorithmic Complexity.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": \"No cycle label on source page; live page for the current (Fall 2027) admission round.\"\n    },\n    {\n      \"category\": \"academic\",\n      \"requirement\": \"Track/course-level special eligibility: compulsory courses within certain specialisation tracks may have additional course-specific prerequisites ('Special eligibility' in the syllabus). Examples given: Multivariable analysis is a special eligibility requirement for compulsory courses within the Data analysis (Data Science) and Cognitive systems tracks; Human-computer interaction is a special entry requirement for compulsory courses within the Interaction Design track; additional prerequisites may exist for some conditionally elective or recommended courses within the tracks.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Within the programme track, there may be courses with additional requirements for special qualifications. ... Multivariable analysis is a special eligibility requirement for compulsory courses within the tracks Data analysis and Cognitive systems. Human-computer interaction is a special entry requirement for compulsory courses within the Interaction Design track. Additional prerequisites may exist for some conditionally elective or recommended courses within the tracks.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": \"Conditional prerequisites; they apply only to courses within the named specialisation tracks (not to programme admission itself), and the authoritative list is stated in each course syllabus.\"\n    },\n    {\n      \"category\": \"language\",\n      \"requirement\": \"English proficiency equivalent to the Swedish upper secondary course English 6 / English Level 2. Can be met with an English test, for example an overall IELTS score of 6.5 or (as stated on the page) a TOEFL score of 4.5; alternatively through completed upper secondary or university studies depending on the country of previous studies (per University Admissions recognised tests).\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"English proficiency equivalent to the Swedish upper secondary course English 6/English Level 2. You can meet the requirement with an English test, for example an overall IELTS score of 6.5 or a TOEFL score of 4.5. Depending on your country of previous studies you could also meet the requirement through completed upper secondary or university studies. Visit University Admissions to see all recognised English tests and what applies to your country of previous studies.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": \"The KTH page's 'TOEFL score of 4.5' wording appears anomalous and is quoted verbatim; the complete list of recognised tests and country-specific exemption rules is delegated to University Admissions (universityadmissions.se), which is outside the accepted kth.se domain, so full test thresholds cannot be confirmed from KTH sources alone.\"\n    },\n    {\n      \"category\": \"materials\",\n      \"requirement\": \"Application deadlines for the August 2027 intake: application opens 16 October 2026; 15 January (2027) last day to apply; 1 February (2027) submit documents and, if required, pay application fee; 1 April (2027) admission results announced.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science\",\n      \"evidence_excerpt\": \"Application deadlines for studies starting August 2027 - 16 October (2026): Application opens; 15 January: Last day to apply; 1 February: Submit documents and, if required, pay application fee; 1 April: Admission results announced.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Fall 2027 (August 2027 intake)\",\n      \"temporal_applicability\": \"target_cycle_confirmed\",\n      \"uncertainty\": null\n    },\n    {\n      \"category\": \"materials\",\n      \"requirement\": \"Degree certificates: official certificates of all completed degrees. Documentation requirements vary by country (per University Admissions).\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Degree certificates - Official certificates of your completed degrees. The documentation requirements vary between countries. Visit University Admissions to see what applies to your country.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": \"Country-specific documentation rules deferred to University Admissions (outside accepted kth.se domain).\"\n    },\n    {\n      \"category\": \"materials\",\n      \"requirement\": \"Transcript: official transcript of courses and grades completed in the degree. Exemption: students from Swedish universities using Ladok do not need to submit degree certificates or transcripts.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Transcript - Official transcript of courses and grades completed in your degree. Students from Swedish universities that use Ladok do not need to submit degree certificates or transcripts.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": null\n    },\n    {\n      \"category\": \"materials\",\n      \"requirement\": \"Proof of English proficiency: required; what proof is needed depends on whether the requirement is met through a test or previous studies (per University Admissions).\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Proof of English proficiency - What proof you need depends on whether you meet the requirement through a test or previous studies. Visit University Admissions to see what applies to you.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": \"Specific accepted proof forms deferred to University Admissions.\"\n    },\n    {\n      \"category\": \"materials\",\n      \"requirement\": \"Identification: a copy of passport with personal data and photograph, or other identification document.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Identification - A copy of passport with personal data and photograph, or other identification document.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": null\n    },\n    {\n      \"category\": \"materials\",\n      \"requirement\": \"CV: must clearly and concisely outline education, relevant research or work experience, extracurricular activities, qualifications and achievements (awards, publications, expertise, skills, etc.); no standard template; must be written in English.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"CV - KTH does not require a standard template, but the CV should clearly and concisely outline your education, relevant research or work experience, extracurricular activities, qualifications and achievements (awards, publications, expertise knowledge and skills, etc.). It must be written in English.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": null\n    },\n    {\n      \"category\": \"materials\",\n      \"requirement\": \"Letter of motivation: explains why you chose this programme at KTH, what you hope to gain, and how your interests and skills will help you succeed; include an autobiography on the development and relevance of your academic and professional pursuits, extra-curricular activities and related experiences. Must be in English and less than 500 words; submit one per programme, stating at the top which programme the letter applies to.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"The letter of motivation explains why you have chosen this programme at KTH ... KTH does not require a standard template, but it must be in English and less than 500 words. If you apply to multiple programmes that require a letter of motivation, you should submit one for each and state which programme each letter applies to at the top of the page.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": null\n    },\n    {\n      \"category\": \"materials\",\n      \"requirement\": \"Letters of recommendation: two letters describing why you are the right choice for admission; preferably one referee from an academic environment and one from a professional setting; same letters may be reused across KTH programmes; provide English translation if in another language; letters must include referees' full contact details; a referee submitting the letter themselves must send it by post to University Admissions stating your name and application number (not by email).\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Two letters of recommendation describing why you are the right choice for admission. Preferably, have one referee from an academic environment and one from a professional setting. ... The letters must have the referees' full contact details. If your referee wants to submit the letter themselves, they must send it by post to University Admissions and state your name and application number. They can not submit the letter via email.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": null\n    },\n    {\n      \"category\": \"materials\",\n      \"requirement\": \"Summary sheet for Computer Science: submit it via the provided link when the application opens (do not upload it to the application on universityadmissions.se); fill out all required information before submitting; an incomplete summary sheet negatively affects the evaluation score.\",\n      \"importance\": \"required\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Submit the summary sheet for Computer Science via the link when the application opens (do not upload it to your application on universityadmissions.se). If you do not submit a complete summary sheet, it will negatively affect your evaluation score. Fill out all required information before submitting the form.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": \"Submission link only becomes available when the application opens (16 October 2026); not yet published.\"\n    },\n    {\n      \"category\": \"other\",\n      \"requirement\": \"Recognition of prior learning: if you entirely or partially lack a formal requirement for the course or programme but believe you have the necessary knowledge, you may apply for recognition of prior learning to meet the requirement.\",\n      \"importance\": \"unknown\",\n      \"status\": \"confirmed\",\n      \"source_url\": \"https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975\",\n      \"evidence_excerpt\": \"Suppose you entirely or partially lack a formal requirement for a course or programme, but you believe you have the necessary knowledge to meet the requirement. In that case, you can apply for recognition of prior learning.\",\n      \"programme_applicability\": \"explicit_programme\",\n      \"source_cycle\": \"Not stated (undated page)\",\n      \"temporal_applicability\": \"undated\",\n      \"uncertainty\": \"Mechanism/exemption pathway; conditions for approval not specified on this page.\"\n    }\n  ],\n  \"unknowns\": [\n    \"The programme's entry-requirements page contains no explicit admission-cycle label; its content is undated. It is the live programme-specific requirements page linked from the programme page advertising the August 2027 intake, so applicability to Fall 2027 is strongly implied but not separately cycle-confirmed on that page.\",\n    \"Exact, full list of recognised English tests and thresholds, and country-specific exemptions/conditions for meeting English 6 via previous studies, are delegated to University Admissions (universityadmissions.se), which is outside the accepted kth.se domain and could not be verified here.\",\n    \"The KTH entry-requirements page states 'a TOEFL score of 4.5' which appears anomalous on the TOEFL scale; no KTH page clarifies the intended TOEFL threshold.\",\n    \"Country-specific documentation rules for degree certificates/transcripts are delegated to University Admissions and not specified on kth.se.\",\n    \"The Computer Science summary sheet submission link is not yet published (available only once the Fall 2027 application opens on 16 October 2026).\",\n    \"Applicability and full detail of track-level 'special eligibility' course prerequisites is stated only in the respective course syllabi, not fully enumerated on the programme admission pages.\"\n  ]\n}\n```",
+      "schema_valid": false,
+      "validation_error": "1 validation error for Requirements\n  Invalid JSON: expected value at line 1 column 1 [type=json_invalid, input_value='Based on the official KT...on pages.\"\\n  ]\\n}\\n```', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.10/v/json_invalid",
+      "posthoc_output_audit": {
+        "candidate_objects": 1,
+        "note": "Recovered for evaluation only; does not change original schema_valid verdict. output_text is the final assistant message; message boundaries were preserved.",
+        "result": {
+          "university": "KTH Royal Institute of Technology",
+          "programme": "Master's Programme in Computer Science (MSc Computer Science, 120 ECTS, given in English)",
+          "requested_admission_cycle": "Fall 2027 (academic year 2027-28; studies starting August 2027)",
+          "observed_admission_cycle": "2027-28 (August 2027 intake) for the programme main page/deadlines; entry requirements page contains no explicit cycle label (undated, live content currently published for this programme)",
+          "cycle_status": "confirmed",
+          "requirements": [
+            {
+              "category": "academic",
+              "requirement": "Hold academic qualifications from an internationally recognised university equivalent to a Swedish bachelor's degree. Applicants in the final year of their bachelor's studies may apply. Students at universities abroad must submit documents per University Admissions instructions; students at Swedish universities must have completed 150 credits in their programme by 1 February.",
+              "importance": "required",
+              "status": "confirmed",
+              "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+              "evidence_excerpt": "Academic qualifications from an internationally recognised university equivalent to a Swedish bachelor's degree. You can meet the requirement if you are in the final year of your bachelor's studies. ... Students at Swedish universities must have completed 150 credits in their programme by 1 February per the instructions from KTH.",
+              "programme_applicability": "explicit_programme",
+              "source_cycle": "Not stated (undated page)",
+              "temporal_applicability": "undated",
+              "uncertainty": "Entry-requirements page carries no admission-cycle label; it is the live programme-specific page linked from the programme page advertising the August 2027 intake. Degree-certificate details are delegated to University Admissions."
+            },
+            {
+              "category": "academic",
+              "requirement": "A bachelor's degree corresponding to 180 ECTS credits (or equivalent), including Mathematics: four different subjects totalling 28.5 ECTS credits. These subjects must include a course in Calculus in one variable, a course in Linear Algebra, a course in Probability Theory and Statistics, and a course in Discrete Mathematics.",
+              "importance": "required",
+              "status": "confirmed",
+              "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+              "evidence_excerpt": "A bachelor’s degree corresponding to 180 ECTS credits, or equivalent, including courses in: - Mathematics: four different subjects with a total of 28.5 ECTS credits. These subjects must include a course in Calculus in one variable, a course in Linear Algebra, a course in Probability Theory and Statistics, and a course in Discrete Mathematics.",
+              "programme_applicability": "explicit_programme",
+              "source_cycle": "Not stated (undated page)",
+              "temporal_applicability": "undated",
+              "uncertainty": "No cycle label on source page; live page for the current (Fall 2027) admission round."
+            },
+            {
+              "category": "academic",
+              "requirement": "A bachelor's degree corresponding to 180 ECTS credits (or equivalent), including Computer technology / Computer science and engineering / Computer science / Information technology: three different subjects totalling 22.5 ECTS credits. These subjects must include a course in Object Oriented Programming, a course in Algorithms and Data Structures, and an in-depth course in Algorithmic Complexity.",
+              "importance": "required",
+              "status": "confirmed",
+              "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+              "evidence_excerpt": "Computer technology/Computer science and engineering/Computer science/Information technology: three different subjects with a total of 22.5 ECTS credits. These subjects must include a course in Object Oriented Programming, a course in Algorithms and Data Structures and an in-depth course in Algorithmic Complexity.",
+              "programme_applicability": "explicit_programme",
+              "source_cycle": "Not stated (undated page)",
+              "temporal_applicability": "undated",
+              "uncertainty": "No cycle label on source page; live page for the current (Fall 2027) admission round."
+            },
+            {
+              "category": "academic",
+              "requirement": "Track/course-level special eligibility: compulsory courses within certain specialisation tracks may have additional course-specific prerequisites ('Special eligibility' in the syllabus). Examples given: Multivariable analysis is a special eligibility requirement for compulsory courses within the Data analysis (Data Science) and Cognitive systems tracks; Human-computer interaction is a special entry requirement for compulsory courses within the Interaction Design track; additional prerequisites may exist for some conditionally elective or recommended courses within the tracks.",
+              "importance": "required",
+              "status": "confirmed",
+              "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+              "evidence_excerpt": "Within the programme track, there may be courses with additional requirements for special qualifications. ... Multivariable analysis is a special eligibility requirement for compulsory courses within the tracks Data analysis and Cognitive systems. Human-computer interaction is a special entry requirement for compulsory courses within the Interaction Design track. Additional prerequisites may exist for some conditionally elective or recommended courses within the tracks.",
+              "programme_applicability": "explicit_programme",
+              "source_cycle": "Not stated (undated page)",
+              "temporal_applicability": "undated",
+              "uncertainty": "Conditional prerequisites; they apply only to courses within the named specialisation tracks (not to programme admission itself), and the authoritative list is stated in each course syllabus."
+            },
+            {
+              "category": "language",
+              "requirement": "English proficiency equivalent to the Swedish upper secondary course English 6 / English Level 2. Can be met with an English test, for example an overall IELTS score of 6.5 or (as stated on the page) a TOEFL score of 4.5; alternatively through completed upper secondary or university studies depending on the country of previous studies (per University Admissions recognised tests).",
+              "importance": "required",
+              "status": "confirmed",
+              "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+              "evidence_excerpt": "English proficiency equivalent to the Swedish upper secondary course English 6/English Level 2. You can meet the requirement with an English test, for example an overall IELTS score of 6.5 or a TOEFL score of 4.5. Depending on your country of previous studies you could also meet the requirement through completed upper secondary or university studies. Visit University Admissions to see all recognised English tests and what applies to your country of previous studies.",
+              "programme_applicability": "explicit_programme",
+              "source_cycle": "Not stated (undated page)",
+              "temporal_applicability": "undated",
+              "uncertainty": "The KTH page's 'TOEFL score of 4.5' wording appears anomalous and is quoted verbatim; the complete list of recognised tests and country-specific exemption rules is delegated to University Admissions (universityadmissions.se), which is outside the accepted kth.se domain, so full test thresholds cannot be confirmed from KTH sources alone."
+            },
+            {
+              "category": "materials",
+              "requirement": "Application deadlines for the August 2027 intake: application opens 16 October 2026; 15 January (2027) last day to apply; 1 February (2027) submit documents and, if required, pay application fee; 1 April (2027) admission results announced.",
+              "importance": "required",
+              "status": "confirmed",
+              "source_url": "https://www.kth.se/en/studies/master/computer-science",
+              "evidence_excerpt": "Application deadlines for studies starting August 2027 - 16 October (2026): Application opens; 15 January: Last day to apply; 1 February: Submit documents and, if required, pay application fee; 1 April: Admission results announced.",
+              "programme_applicability": "explicit_programme",
+              "source_cycle": "Fall 2027 (August 2027 intake)",
+              "temporal_applicability": "target_cycle_confirmed",
+              "uncertainty": null
+            },
+            {
+              "category": "materials",
+              "requirement": "Degree certificates: official certificates of all completed degrees. Documentation requirements vary by country (per University Admissions).",
+              "importance": "required",
+              "status": "confirmed",
+              "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+              "evidence_excerpt": "Degree certificates - Official certificates of your completed degrees. The documentation requirements vary between countries. Visit University Admissions to see what applies to your country.",
+              "programme_applicability": "explicit_programme",
+              "source_cycle": "Not stated (undated page)",
+              "temporal_applicability": "undated",
+              "uncertainty": "Country-specific documentation rules deferred to University Admissions (outside accepted kth.se domain)."
+            },
+            {
+              "category": "materials",
+              "requirement": "Transcript: official transcript of courses and grades completed in the degree. Exemption: students from Swedish universities using Ladok do not need to submit degree certificates or transcripts.",
+              "importance": "required",
+              "status": "confirmed",
+              "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+              "evidence_excerpt": "Transcript - Official transcript of courses and grades completed in your degree. Students from Swedish universities that use Ladok do not need to submit degree certificates or transcripts.",
+              "programme_applicability": "explicit_programme",
+              "source_cycle": "Not stated (undated page)",
+              "temporal_applicability": "undated",
+              "uncertainty": null
+            },
+            {
+              "category": "materials",
+              "requirement": "Proof of English proficiency: required; what proof is needed depends on whether the requirement is met through a test or previous studies (per University Admissions).",
+              "importance": "required",
+              "status": "confirmed",
+              "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+              "evidence_excerpt": "Proof of English proficiency - What proof you need depends on whether you meet the requirement through a test or previous studies. Visit University Admissions to see what applies to you.",
+              "programme_applicability": "explicit_programme",
+              "source_cycle": "Not stated (undated page)",
+              "temporal_applicability": "undated",
+              "uncertainty": "Specific accepted proof forms deferred to University Admissions."
+            },
+            {
+              "category": "materials",
+              "requirement": "Identification: a copy of passport with personal data and photograph, or other identification document.",
+              "importance": "required",
+              "status": "confirmed",
+              "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+              "evidence_excerpt": "Identification - A copy of passport with personal data and photograph, or other identification document.",
+              "programme_applicability": "explicit_programme",
+              "source_cycle": "Not stated (undated page)",
+              "temporal_applicability": "undated",
+              "uncertainty": null
+            },
+            {
+              "category": "materials",
+              "requirement": "CV: must clearly and concisely outline education, relevant research or work experience, extracurricular activities, qualifications and achievements (awards, publications, expertise, skills, etc.); no standard template; must be written in English.",
+              "importance": "required",
+              "status": "confirmed",
+              "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+              "evidence_excerpt": "CV - KTH does not require a standard template, but the CV should clearly and concisely outline your education, relevant research or work experience, extracurricular activities, qualifications and achievements (awards, publications, expertise knowledge and skills, etc.). It must be written in English.",
+              "programme_applicability": "explicit_programme",
+              "source_cycle": "Not stated (undated page)",
+              "temporal_applicability": "undated",
+              "uncertainty": null
+            },
+            {
+              "category": "materials",
+              "requirement": "Letter of motivation: explains why you chose this programme at KTH, what you hope to gain, and how your interests and skills will help you succeed; include an autobiography on the development and relevance of your academic and professional pursuits, extra-curricular activities and related experiences. Must be in English and less than 500 words; submit one per programme, stating at the top which programme the letter applies to.",
+              "importance": "required",
+              "status": "confirmed",
+              "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+              "evidence_excerpt": "The letter of motivation explains why you have chosen this programme at KTH ... KTH does not require a standard template, but it must be in English and less than 500 words. If you apply to multiple programmes that require a letter of motivation, you should submit one for each and state which programme each letter applies to at the top of the page.",
+              "programme_applicability": "explicit_programme",
+              "source_cycle": "Not stated (undated page)",
+              "temporal_applicability": "undated",
+              "uncertainty": null
+            },
+            {
+              "category": "materials",
+              "requirement": "Letters of recommendation: two letters describing why you are the right choice for admission; preferably one referee from an academic environment and one from a professional setting; same letters may be reused across KTH programmes; provide English translation if in another language; letters must include referees' full contact details; a referee submitting the letter themselves must send it by post to University Admissions stating your name and application number (not by email).",
+              "importance": "required",
+              "status": "confirmed",
+              "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+              "evidence_excerpt": "Two letters of recommendation describing why you are the right choice for admission. Preferably, have one referee from an academic environment and one from a professional setting. ... The letters must have the referees' full contact details. If your referee wants to submit the letter themselves, they must send it by post to University Admissions and state your name and application number. They can not submit the letter via email.",
+              "programme_applicability": "explicit_programme",
+              "source_cycle": "Not stated (undated page)",
+              "temporal_applicability": "undated",
+              "uncertainty": null
+            },
+            {
+              "category": "materials",
+              "requirement": "Summary sheet for Computer Science: submit it via the provided link when the application opens (do not upload it to the application on universityadmissions.se); fill out all required information before submitting; an incomplete summary sheet negatively affects the evaluation score.",
+              "importance": "required",
+              "status": "confirmed",
+              "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+              "evidence_excerpt": "Submit the summary sheet for Computer Science via the link when the application opens (do not upload it to your application on universityadmissions.se). If you do not submit a complete summary sheet, it will negatively affect your evaluation score. Fill out all required information before submitting the form.",
+              "programme_applicability": "explicit_programme",
+              "source_cycle": "Not stated (undated page)",
+              "temporal_applicability": "undated",
+              "uncertainty": "Submission link only becomes available when the application opens (16 October 2026); not yet published."
+            },
+            {
+              "category": "other",
+              "requirement": "Recognition of prior learning: if you entirely or partially lack a formal requirement for the course or programme but believe you have the necessary knowledge, you may apply for recognition of prior learning to meet the requirement.",
+              "importance": "unknown",
+              "status": "confirmed",
+              "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+              "evidence_excerpt": "Suppose you entirely or partially lack a formal requirement for a course or programme, but you believe you have the necessary knowledge to meet the requirement. In that case, you can apply for recognition of prior learning.",
+              "programme_applicability": "explicit_programme",
+              "source_cycle": "Not stated (undated page)",
+              "temporal_applicability": "undated",
+              "uncertainty": "Mechanism/exemption pathway; conditions for approval not specified on this page."
+            }
+          ],
+          "unknowns": [
+            "The programme's entry-requirements page contains no explicit admission-cycle label; its content is undated. It is the live programme-specific requirements page linked from the programme page advertising the August 2027 intake, so applicability to Fall 2027 is strongly implied but not separately cycle-confirmed on that page.",
+            "Exact, full list of recognised English tests and thresholds, and country-specific exemptions/conditions for meeting English 6 via previous studies, are delegated to University Admissions (universityadmissions.se), which is outside the accepted kth.se domain and could not be verified here.",
+            "The KTH entry-requirements page states 'a TOEFL score of 4.5' which appears anomalous on the TOEFL scale; no KTH page clarifies the intended TOEFL threshold.",
+            "Country-specific documentation rules for degree certificates/transcripts are delegated to University Admissions and not specified on kth.se.",
+            "The Computer Science summary sheet submission link is not yet published (available only once the Fall 2027 application opens on 16 October 2026).",
+            "Applicability and full detail of track-level 'special eligibility' course prerequisites is stated only in the respective course syllabi, not fully enumerated on the programme admission pages."
+          ]
+        },
+        "returned_count": 15,
+        "confirmed_count": 15,
+        "official_domain_rate": 1.0
+      }
+    }
+  ],
+  "posthoc_baselines": {
+    "kth_fixture": {
+      "observed_count_reference": 15,
+      "target": {
+        "university": "KTH Royal Institute of Technology",
+        "program": "Master's Programme in Computer Science",
+        "official_program_url": "https://www.kth.se/en/studies/master/computer-science",
+        "official_domain": "www.kth.se",
+        "intended_entry_year": 2027,
+        "intended_entry_term": "fall"
+      },
+      "requirements": [
+        {
+          "category": "academic",
+          "requirement": "A bachelor's degree equivalent to a Swedish bachelor's degree of 180 ECTS is required.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "academic",
+          "requirement": "Final-year applicants may satisfy the degree documentation rules conditionally.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "conditional_admission"
+        },
+        {
+          "category": "course",
+          "requirement": "Mathematics must cover four subjects totalling 28.5 ECTS, including Calculus, Linear Algebra, Probability and Statistics, and Discrete Mathematics.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "course",
+          "requirement": "Computer Science must cover three subjects totalling 22.5 ECTS, including Object Oriented Programming, Algorithms and Data Structures, and Algorithmic Complexity.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "course",
+          "requirement": "Some compulsory track courses have additional eligibility requirements after enrolment.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "in_program"
+        },
+        {
+          "category": "language",
+          "requirement": "English 6 or Level 2 is required and may be met by IELTS 6.5, TOEFL, or eligible previous studies.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "materials",
+          "requirement": "Official degree certificates must be submitted.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "materials",
+          "requirement": "An official transcript must be submitted.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "materials",
+          "requirement": "Proof of English proficiency must be submitted.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "materials",
+          "requirement": "A passport copy or identification document must be submitted.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "materials",
+          "requirement": "A CV written in English must be submitted.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "materials",
+          "requirement": "A motivation letter in English of less than 500 words must be submitted.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "materials",
+          "requirement": "Two letters of recommendation must be submitted.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "materials",
+          "requirement": "The Computer Science summary sheet must be completed and submitted.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        },
+        {
+          "category": "other",
+          "requirement": "Applicants must pass the selection process.",
+          "importance": "required",
+          "source_level": "program",
+          "source_type": "official_retrieval",
+          "verification_status": "official_verified",
+          "source_url": "https://www.kth.se/en/studies/master/computer-science/entry-requirements-computer-science-1.419975",
+          "source_cycle": null,
+          "temporal_applicability": "undated",
+          "applicability_stage": "pre_admission"
+        }
+      ]
+    },
+    "historical_report_sections": {
+      "kth": " FAIL\n\n- Actual result: Requirements, Timeline, Interview and Gap completed; Action Plan was rejected by the Planning Validator.\n- Failure module: End-to-End MVP Workflow\n- Failure reason: HTTPException: 502: Action kind violates code selector for Gap: materials:2\n- Baseline latency: 72.769 s\n- Baseline DeepSeek requests: 5（Web Search API 2；非 Web LLM 3）\n- Supplemental snapshot capture: 43.475 s；2 additional Web Search API requests（Requirements 24.418 s；Timeline 19.057 s）\n- Capture note: this supplemental snapshot may differ from the stochastic snapshot used by the original failed workflow; it is preserved for manual inspection only.\n- Completed phase latency before failure: `{\"requirements_seconds\": 30.886, \"timeline_seconds\": 15.974, \"interview_gap_plan_seconds\": 12.462, \"gap_analysis_seconds\": 2.046}`\n\n#",
+      "oxford": " FAIL\n\n- Actual result: Requirements, Timeline, Interview and Gap completed; Action Plan was rejected by the Planning Validator.\n- Failure module: End-to-End MVP Workflow\n- Failure reason: HTTPException: 502: Action kind violates code selector for Gap: language:1\n- Baseline latency: 86.456 s\n- Baseline DeepSeek requests: 5（Web Search API 2；非 Web LLM 3）\n- Supplemental snapshot capture: 72.541 s；2 additional Web Search API requests（Requirements 58.977 s；Timeline 13.564 s）\n- Capture note: this supplemental snapshot may differ from the stochastic snapshot used by the original failed workflow; it is preserved for manual inspection only.\n- Completed phase latency before failure: `{\"requirements_seconds\": 49.652, \"timeline_seconds\": 11.103, \"interview_gap_plan_seconds\": 10.048, \"gap_analysis_seconds\": 2.248}`\n\n#"
+    },
+    "caveat": "Oxford Biology fixture is excluded: wrong programme. Historical snapshots are not current ground truth. No fresh production workflow run; provider-internal model rounds are undisclosed."
+  }
+}

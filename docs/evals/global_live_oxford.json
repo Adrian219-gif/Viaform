@@ -1,0 +1,165 @@
+{
+  "search": {
+    "request": {
+      "Query": "University of Oxford MSc Advanced Computer Science entry requirements",
+      "SearchType": "web",
+      "DocCount": 5
+    },
+    "latency_seconds": 0.769,
+    "http_status": 200,
+    "requests": 1,
+    "response": {
+      "ResponseMetadata": {
+        "RequestId": "20260904131220EC366539BB718D3B6E96",
+        "Action": "",
+        "Version": "",
+        "Service": "",
+        "Region": ""
+      },
+      "Result": {
+        "TotalDocCount": 20,
+        "Documents": [
+          {
+            "Rank": 0,
+            "Url": "https://www.ox.ac.uk/admissions/graduate/courses/msc-advanced-computer-science?trk=public_post_comment-text",
+            "Title": "MSc in Advanced Computer Science",
+            "Snippet": [
+              {
+                "Type": "text",
+                "Text": "Entry requirements\nFor entry in 2026-27\nProven and potential academic excellence\nThe requirements described below are specific to this course and apply only in the year of entry that is shown. You can use our guidance to help you evaluate whether your application is likely to be competitive.\nPlease be aware that any studentships that are linked to this course may have different or additional requirements and you should read any studentship information carefully before applying.\nDegree-level qualifications\nAs a minimum, applicants should hold or be predicted to achieve the following UK qualifications or their equivalent:\na first-class undergraduate degree with honours in computer science or mathematics\nFor applicants with a bachelor's degree from the USA, the minimum overall GPA that is normally required to meet the undergraduate-level requirement is 3.7 out of 4.0.\nIf your degree is not from the UK or another country specified above, visit our International Qualifications page for guidance on the qualifications and grades that would usually be considered to meet the University’s minimum entry requirements.\nGRE General Test scores\nNo Graduate Record Examination (GRE) or GMAT scores are sought.\nOther qualifications, evidence of excellence and relevant experience\nIt is vital that you possess the necessary background to cope with mathematical notation and basic skills in computer programming. Applicants should have carried out some programming projects either in employment or study, potentially including self-directed study. There are no specific programming languages that are prioritised but it is important that you have engaged with the task of coding and implementing algorithms.\nYou are not required to submit publications with your application, but if you do have publications please give details.\nEnglish language proficiency\nThis course requires proficiency in English at the University's higher level. If your first language is not English, you may need to provide evidence that you meet this requirement. The minimum scores required to meet the University's higher level are detailed in the table below.| Test | Minimum overall score | Minimum score per component |\n| --- | --- | --- |\n| IELTS Academic (Institution code: 0713) | 7.5 | 7.0 |\n| TOEFL iBT* including the 'Home Edition' (Institution code: 0490) | 110 | Listening: 22 Reading: 24 Speaking: 25 Writing: 24 |\n| C1 Advanced ^{†} | 191 | 185 |\n\n"
+              }
+            ],
+            "DocumentInfo": {
+              "ContentCharCount": 32034,
+              "ContentTokenCount": 1896,
+              "Filetype": "webpage",
+              "PublishTime": ""
+            },
+            "HostInfo": {
+              "Hostname": "University of Oxford",
+              "IconUrl": "https://p26-volcsearch-d-sign.byteimg.com/isp-i18n-media/img/11f249fc87b2a4bc97ffcd2660e6c205~tplv-be4g95zd3a-224x224.jpeg?lk3s=feb11e32&x-expires=1793682741&x-signature=qiuD5NniBihrFAoZvUwgMrEp9hQ%3D",
+              "AuthorityLevel": "very_high"
+            }
+          },
+          {
+            "Rank": 1,
+            "Url": "https://liuxue.xdf.cn/blog/likun3/blog/5129972.shtml",
+            "Title": "英国留学计算机科学与信息系统专业院校推荐_李堃的博客-新东方前途出国",
+            "Snippet": [
+              {
+                "Type": "text",
+                "Text": "英国留学计算机科学与信息系统专业院校推荐\n随意找的计算机科学与信息系统专业，一下子就被这个专业吸引了，经过整理之后，一下子就被这些院校的此专业震惊到，不仅是排名非常不错，口碑一样一顶一！\n英国留学计算机科学与信息系统专业院校推荐① 牛津大学（University of Oxford）\n【计算机学科】英国第1，世界第5\n其实牛津大学的计算机学科在QS、THE和软科三大排名中都是位列英国第一的！\n其计算机学院从事的研究领域包括算法、人工智能、计算生物学、编程语言、软件工程等等。专业注重活学活用，大多数专业的学习与实验室操作相配合。\n计算机学院开设专业：\n·MSc in Advanced Computer Science\n·MSc in Mathematics and Foundations of Computer Science\n附MSc in Advanced Computer Science专业申请要求：\n·英国本科：一等学位\n·国内本科：211/985院校90%，双非院校95%\n·要求是计算机/数学学科背景\n·雅思：7.5（7.0）\n随意找的计算机科学与信息系统专业，一下子就被这个专业吸引了，经过整理之后，一下子就被这些院校的此专业震惊到，不仅是排名非常不错，口碑一样一顶一！\n英国留学计算机科学与信息系统专业院校推荐 ① 牛津大学（University of Oxford）\n【计算机学科】英国第1，世界第5\n其实牛津大学的计算机学科在QS、THE和软科三大排名中都是位列英国第一的！\n其计算机学院从事的研究领域包括算法、人工智能、计算生物学、编程语言、软件工程等等。专业注重活学活用，大多数专业的学习与实验室操作相配合。\n计算机学院开设专业：\n·MSc in Advanced Computer Science\n·MSc in Mathematics and Foundations of Computer Science\n附MSc in Advanced Computer Science专业申请要求：\n·英国本科：一等学位\n·国内本科：211/985院校90%，双非院校95%\n·要求是计算机/数学学科背景\n·雅思：7.5（7.0）\n随意找的计算机科学与信息系统专业，一下子就被这个专业吸引了，...\n英国留学计算机科学与信息系统专业院校推荐① 牛津大学（University of Oxford）\n"
+              }
+            ],
+            "DocumentInfo": {
+              "ContentCharCount": 3011,
+              "ContentTokenCount": 1598,
+              "Filetype": "webpage",
+              "PublishTime": ""
+            },
+            "HostInfo": {
+              "Hostname": "新东方前途出国",
+              "IconUrl": "https://p11-volcsearch-d-sign.byteimg.com/isp-i18n-media/img/c86b180c94dc748fe4f9e52c8e330455~tplv-be4g95zd3a-224x224.jpeg?lk3s=feb11e32&x-expires=1793682741&x-signature=0imBqefdwWPwBI6BBRmTmbSK%2FTg%3D",
+              "AuthorityLevel": "high"
+            }
+          },
+          {
+            "Rank": 2,
+            "Url": "https://collegedunia.com/uk/university/865-university-of-oxford-oxford/master-of-science-msc-advanced-computer-science-170427",
+            "Title": "Oxford MSc Computer Science Fees, Requirement, Application, Deadline 2026.",
+            "Snippet": [
+              {
+                "Type": "text",
+                "Text": "Admission Requirements & Process\nThe MSc in Advanced Computer Science is highly selective. Applicants must demonstrate proven and potential academic excellence with a strong mathematical foundation and programming experience.\nAcademic Eligibility\nDegree-Level Qualifications:\nMinimum: First-class undergraduate degree with honours in Computer Science or Mathematics.\nFor USA bachelor's degrees: Minimum GPA 3.7 out of 4.0.\nFor Indian degrees: Equivalent to first-class (typically 70%+ or 8.0+ CGPA from recognized universities).\nApplicants with upper second-class degrees may be considered if they demonstrate exceptional programming projects or professional experience.\nProgramming Experience:\nApplicants must have carried out programming projects either in employment or study, potentially including self-directed study.\nNo specific programming languages prioritized; evidence of coding and algorithm implementation essential.\nPublications not required but will strengthen application if available.\nEnglish Language Proficiency\nThis course requires proficiency in English at the University's higher level. If your first language is not English, you must provide evidence of meeting this requirement.\nRequired Scores:| Test | Minimum Overall Score | Minimum Per Component |\n| --- | --- | --- |\n| IELTS Academic | 7.5 | 7.0 |\n| TOEFL iBT | 110 | Listening: 22, Reading: 24, Speaking: 25, Writing: 24 |\n| C1 Advanced | 191 | 185 |\n| C2 Proficiency | 191 | 185 |\n| Oxford Test of English Advanced | 165 | 155 |\n\nNote: TOEFL tests taken from 21 January 2026 onwards are not accepted until the University completes its review of the revised test. All tests must be taken no more than 2 years before course start date.\nApplication Process\nSubmit application via Oxford's online application system with: CV/résumé (1-2 pages), Statement of Purpose (max 1,000 words), Official transcripts, Three academic references (preferred).\nAns: Admission requires a first-class undergraduate degree with honours in Computer Science or Mathematics (or equivalent; USA GPA 3.7+; Indian equivalent 70%+ or 8.0+ CGPA). You must demonstrate strong programming experience through projects in employment or study;...\n"
+              }
+            ],
+            "DocumentInfo": {
+              "ContentCharCount": 130557,
+              "ContentTokenCount": 3169,
+              "Filetype": "webpage",
+              "PublishTime": "2026-07-31T00:00:00+08:00"
+            },
+            "HostInfo": {
+              "Hostname": "Collegedunia",
+              "IconUrl": "https://p26-volcsearch-d-sign.byteimg.com/isp-i18n-media/img/824d5180321b2de36a9e3a167ed85239~tplv-be4g95zd3a-224x224.jpeg?lk3s=feb11e32&x-expires=1793682741&x-signature=nRcSV77xQ2paoIl%2FKUzUP4E4lKw%3D",
+              "AuthorityLevel": "normal"
+            }
+          },
+          {
+            "Rank": 3,
+            "Url": "https://ulec.com.cn/posts/uk-oxford-cs/",
+            "Title": "牛津大学计算机/数据科学专业:学费、雅思要求与申请指南 | UNILINK优领教育",
+            "Snippet": [
+              {
+                "Type": "text",
+                "Text": "牛津大学2026计算机与数据科学专业：学费、雅思要求与申请指南\n牛津大学计算机科学系是英国乃至全球最具影响力的计算研究中心之一，2026年入学季继续向国际学生开放 Computer Science（BA/MMath） 这一核心本科路径，同时数学系与统计系也提供了覆盖数据科学方向的本科及硕士项目。热门专业包括 本科 Computer Science 、Mathematics and Computer Science ，以及硕士阶段的 MSc in Advanced Computer Science 、MSc in Statistical Science (Data Science stream) 。国际生学费落在 £38,550–£41,250/年 区间（2026学年），雅思要求统一为 总分7.0，单项不低于6.5 ，申请须通过 UCAS 系统于 2025年10月15日 前提交，并参加 MAT 数学入学测试（部分课程）及面试。\n时效声明：以下数据截至2026年7月，均来自牛津大学各系官网、招生简章与公开录取统计。学费每年可能按通胀调整，最终金额以牛津大学官方录取通知书上的数字为准。...\n雅思与英语语言要求 #\n牛津大学所有计算机及数据科学相关专业对国际生的英语要求一致，执行 Higher Level 标准：\n雅思学术类（IELTS Academic）：总分 7.0，各单项不低于 6.5\n托福 iBT：总分 100，其中听力不低于 22，阅读与写作不低于 24，口语不低于 25\nPTE Academic：总分 70，各单项不低于 65\n接受 Cambridge English C2 Proficiency（总分 185，单项 176）等\n值得注意的是，牛津不接受雅思 Indicator 或托福家考成绩。语言成绩必须在入学前两年内有效，且须在 2026 年 7 月 31 日前 满足所有条件。若申请时未提交语言成绩，conditional offer 也会将该要求列为学术条件之一。对于就读国际高中（如 IB、A-Level）已全英语授课的学生，可通过学校开具的英语教学证明申请豁免，但最终解释权归牛津各学院自行裁定。\n"
+              }
+            ],
+            "DocumentInfo": {
+              "ContentCharCount": 5501,
+              "ContentTokenCount": 3167,
+              "Filetype": "webpage",
+              "PublishTime": "2026-06-28T00:00:00+08:00"
+            },
+            "HostInfo": {
+              "Hostname": "UNILINK优领教育",
+              "IconUrl": "",
+              "AuthorityLevel": "normal"
+            }
+          },
+          {
+            "Rank": 4,
+            "Url": "https://www.htiedu-uk.com/news-3748.html",
+            "Title": "计算机专业哪家强?!英国TOP100院校申请要求汇总",
+            "Snippet": [
+              {
+                "Type": "text",
+                "Text": "计算机专业哪家强？！英国TOP100院校申请要求汇总\n尽管如此，申请者也不能盲目选择。那么，英国各大院校计算机类的硕士专业都有哪些？每个学校申请要求如何？\n今天，来了解一下英国QS100院校计算机专业的选择，以及申请要求 吧~\n英国TOP院校计算机专业推荐\n– 学术要求：在包含大量计算机相关内容的...\n– 中国学生均分要求：来自 211 大学的学生，均分要求 80% 或更高，学校会优先考虑 85% 或以上的申请人。\n牛津大学(QS4)\n✦ MSc in Advanced Computer Science\n– 学术要求：计算机科学或数学专业的一等本科荣誉学位。\n– 中国学生均分要求：双一流大学、原 985 / 211 院校申请人均分要求 90%；其他院校均分要求达到 95%。其他院校成绩低于 95% 的申请人，还应至少拥有硕士学位且成绩合格。\n– 语言要求：雅思 7.5，单项 7.0。\n✦ MSc in Mathematical Modelling and Scientific Computing\n– 学术要求：具有大量数学内容学科的一等本科荣誉学位。\n– 中国学生均分要求：双一流大学、原 985 / 211 院校申请人均分要求 90%；其他院校均分要求达到 95%。其他院校成绩低于 95% 的申请人，还应至少拥有硕士学位且成绩合格。\n– 语言要求：雅思 7.5，单项 7.0。\n✦ MSc in Mathematics and Foundations of Computer Science\n– 学术要求：数学课程占比较大的专业的一等本科荣誉学位 。\n– 中国学生均分要求：双一流大学、原 985 / 211 院校申请人均分要求 90%；其他院校均分要求达到 95%。其他院校成绩低于 95% 的申请人，还应至少拥有硕士学位且成绩合格。\n– 语言要求：雅思 7.5，单项 7.0。\n-以上专业985院校要求73，211以及软科前二百要求78(计算机学院只接受软科前200)。\n"
+              }
+            ],
+            "DocumentInfo": {
+              "ContentCharCount": 5690,
+              "ContentTokenCount": 3436,
+              "Filetype": "webpage",
+              "PublishTime": "2025-08-15T00:00:00+08:00"
+            },
+            "HostInfo": {
+              "Hostname": "华通国际教育",
+              "IconUrl": "https://p26-volcsearch-d-sign.byteimg.com/isp-i18n-media/img/a4548abb58d48503757a6c202ed8e682~tplv-be4g95zd3a-224x224.jpeg?lk3s=feb11e32&x-expires=1793682741&x-signature=TkPpj%2F37qWmYv5%2FhP0KZnAAM8ZM%3D",
+              "AuthorityLevel": "normal"
+            }
+          }
+        ],
+        "ErrorCode": 0,
+        "ErrorMsg": "",
+        "Choices": null,
+        "Usage": null
+      }
+    },
+    "exact_found": true,
+    "rank": 1,
+    "url": "https://www.ox.ac.uk/admissions/graduate/courses/msc-advanced-computer-science?trk=public_post_comment-text"
+  },
+  "fetch": {
+    "latency_seconds": 4.468,
+    "final_url": "https://www.ox.ac.uk/admissions/graduate/courses/msc-advanced-computer-science?trk=public_post_comment-text",
+    "http_status": 403,
+    "hops": [
+      {
+        "url": "https://www.ox.ac.uk/admissions/graduate/courses/msc-advanced-computer-science?trk=public_post_comment-text",
+        "status": 403
+      }
+    ],
+    "headers": {
+      "date": "Fri, 04 Sep 2026 05:12:25 GMT",
+      "last-modified": null,
+      "age": null,
+      "cache-control": null,
+      "etag": null
+    },
+    "error": "HTTPStatusError: Client error '403 Forbidden' for url 'https://www.ox.ac.uk/admissions/graduate/courses/msc-advanced-computer-science?trk=public_post_comment-text'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/403"
+  },
+  "extraction": {},
+  "retries": 0,
+  "wall_clock_seconds": 5.295
+}

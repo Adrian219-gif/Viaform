@@ -133,20 +133,13 @@ AI is used for search and semantic tasks, while deterministic code handles stabl
 ```text
 frontend/      Next.js 产品界面
 backend/       FastAPI、AI workflow、本地数据与测试
-docs/evals/    Eval dataset、历史报告与 regression records
+docs/evals/    MVP evaluation dataset and supporting records
 dev.py         Frontend + Backend 本地启动入口
 ```
 
-## Evaluation & Documentation
-
-项目包含 targeted tests、regression tests 和针对动态招生事实的人工审核记录：
+## Evaluation
 
 - [MVP Eval Dataset](docs/evals/mvp_eval_dataset.md)
-- [MVP Baseline Eval Report](docs/evals/mvp_eval_report.md)
-- [Manual Review Results](docs/evals/mvp_manual_review_results.md)
-- [Regression Cases](docs/evals/regression_cases.md)
-
-历史 Eval 报告用于记录当时的结果和修复来源，不代表当前代码的最新全量评测结论。
 
 ## Known Limitations
 

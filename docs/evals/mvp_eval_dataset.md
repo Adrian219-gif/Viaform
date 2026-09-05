@@ -90,6 +90,18 @@ Manual Review 不是要求模型逐字、逐项复刻官网全部内容，也不
 
 - `comparison_rule`: Core case 的 Gap/Planning 比较以相同 live Requirements snapshot、相同 Timeline snapshot、上述 fixture 和固定 `planning_reference_date` 为前提；官网 snapshot 变化时不得把跨时间结果差异直接判为产品回归。
 
+## Representative Website / Retrieval Coverage
+
+下表描述的是仓库测试期间观察到的 Retrieval 特征，不代表这些网站的永久属性。动态官网事实仍须在每次执行时按 Manual Review Rubric 复核。
+
+| Case | Programme | Website / Retrieval Characteristic | Main Risk | Repository evidence |
+| --- | --- | --- | --- | --- |
+| `CORE-001` | RCA Painting MA | Exact programme page contains important sections that were missed in a preserved retrieval snapshot; observed during project testing. | Overview-only or section-level recall can omit required portfolio, statement, video, or language evidence. | `docs/evals/regression_cases.md#REQ-REG-001`; `docs/evals/mvp_manual_review_results.md#REQ-REG-001--RCA-Painting-MA` |
+| `CORE-002` | Oxford MSc Advanced Computer Science | Exact programme URL was known, but project tests observed unstable section recall, an HTTP 403 from the local direct-fetch path, and a previous-cycle/current-target-cycle distinction. | A known URL may still yield incomplete evidence; access restrictions and cycle interpretation can prevent reliable programme-level extraction. | `docs/evals/mvp_manual_review_results.md#CORE-002--Oxford-MSc-Advanced-Computer-Science`; `docs/evals/global_live_oxford_review.md` |
+| `CORE-003` | UC Berkeley M.S. EECS | Similar programme identities and a mix of programme/general/archive sources were observed during evaluation. | Requirements can be attributed to the wrong degree path or to stale/non-exact sources. | `docs/evals/mvp_eval_report.md#CORE-003--MANUAL-REVIEW`; `docs/evals/mvp_manual_review_results.md#CORE-003--Berkeley-MS-EECS`; `EDGE-009` below |
+| `CORE-004` | Imperial Applied Machine Learning MSc | Evaluation used exact-programme plus broader official evidence, while target-cycle Timeline remained unpublished/not found and some facts came from a previous cycle. | Source-level applicability and current-cycle availability must remain explicit; missing dates must not be invented. | `docs/evals/mvp_eval_report.md#CORE-004--MANUAL-REVIEW`; `docs/evals/mvp_manual_review_results.md#CORE-004--Imperial-Applied-Machine-Learning-MSc` |
+| `CORE-005` | KTH MSc Computer Science | A directly readable, long, information-dense programme entry page combines eligibility, documents, selection, undated rules, and in-program track conditions. Project testing also observed omission of a programme-specific summary sheet. | Dense pages can lose individual materials or confuse admission requirements with in-program conditions; linked general instructions do not replace programme-level evidence. | `docs/evals/mvp_manual_review_results.md#CORE-005--KTH-MSc-Computer-Science`; `backend/scripts/test_requirements_web_search.py`; `docs/evals/kth_two_stage_final_review.md` |
+
 ## Core Cases
 
 ### CORE-001 — RCA Painting MA
@@ -97,6 +109,11 @@ Manual Review 不是要求模型逐字、逐项复刻官网全部内容，也不
 - `case_id`: `CORE-001`
 - `module`: `End-to-End MVP Workflow`
 - `case_type`: `core`
+- `tags`: `[core, programme_page_sections, section_recall, dynamic_official_facts]`
+- `website_characteristic`: Observed during project testing: the official programme page contains distinct application-requirement sections, while a preserved snapshot returned no Requirements.
+- `retrieval_risk`: Exact-page discovery alone is insufficient if the retriever captures only an overview or misses sections containing portfolio, statement, video, language, or other application requirements.
+- `why_representative`: Exercises section-level recall on a known programme page and checks that incomplete retrieval is not mistaken for an absence of requirements.
+- `classification_evidence`: `docs/evals/regression_cases.md#REQ-REG-001`; `docs/evals/mvp_manual_review_results.md#REQ-REG-001--RCA-Painting-MA`.
 - `user_fixture`: `UF-CORE-001`
 - `user_answer_script`: 使用 `UF-CORE-001.user_answer_script`，不得临时补充或改写用户背景。
 - `input / scenario`: 用户选择 Royal College of Art 的 Painting MA，确认一个未来入学周期，依次进入 Requirements、Adaptive Interview、Gap、Timeline 与 Planning。
@@ -110,6 +127,11 @@ Manual Review 不是要求模型逐字、逐项复刻官网全部内容，也不
 - `case_id`: `CORE-002`
 - `module`: `End-to-End MVP Workflow`
 - `case_type`: `core`
+- `tags`: `[core, known_exact_url, access_restriction_observed, section_recall, cycle_transition]`
+- `website_characteristic`: Observed during project testing: the exact programme page was identifiable, but preserved retrieval could return zero Requirements; the repository's direct-fetch diagnostic recorded HTTP 403 for the same page, and reviewed content belonged to 2026-27 while the fixture targets Fall 2027.
+- `retrieval_risk`: A correct URL does not guarantee that usable page evidence enters the model context; fallback access and previous-cycle classification must remain distinguishable from successful current-page retrieval.
+- `why_representative`: Combines known-URL retrieval, observed access restriction, stochastic section recall, and not-yet-published target-cycle handling without treating any observation as a permanent site property.
+- `classification_evidence`: `docs/evals/mvp_manual_review_results.md#CORE-002--Oxford-MSc-Advanced-Computer-Science`; `docs/evals/global_live_oxford_review.md`; `backend/scripts/test_requirements_direct_fetch_fallback.py`.
 - `user_fixture`: `UF-CORE-001`
 - `user_answer_script`: 使用 `UF-CORE-001.user_answer_script`，不得临时补充或改写用户背景。
 - `input / scenario`: 用户选择 University of Oxford 的 MSc Advanced Computer Science，确认目标入学周期后运行完整申请规划流程。
@@ -123,6 +145,11 @@ Manual Review 不是要求模型逐字、逐项复刻官网全部内容，也不
 - `case_id`: `CORE-003`
 - `module`: `End-to-End MVP Workflow`
 - `case_type`: `core`
+- `tags`: `[core, programme_identity, multi_source, source_freshness, similar_programmes]`
+- `website_characteristic`: Observed during evaluation: programme identity required explicit confirmation, and the Requirements snapshot combined programme/general sources with an archived 2024-25 guide.
+- `retrieval_risk`: Similar EECS/CS degree paths can be merged or misidentified, while an archive or university-level page can appear authoritative without being current programme-level evidence.
+- `why_representative`: Tests exact programme identity, source-level attribution, and freshness together rather than counting another institution as coverage by itself.
+- `classification_evidence`: `docs/evals/mvp_eval_report.md#CORE-003--MANUAL-REVIEW`; `docs/evals/mvp_manual_review_results.md#CORE-003--Berkeley-MS-EECS`; `EDGE-009` below.
 - `user_fixture`: `UF-CORE-001`
 - `user_answer_script`: 使用 `UF-CORE-001.user_answer_script`，不得临时补充或改写用户背景。
 - `input / scenario`: 目标项目固定为 University of California, Berkeley 的 `Master of Science in Electrical Engineering and Computer Sciences (M.S. EECS)`；执行时由人工确认该项目当前官方名称和 exact programme URL，再选择目标申请周期。
@@ -136,6 +163,11 @@ Manual Review 不是要求模型逐字、逐项复刻官网全部内容，也不
 - `case_id`: `CORE-004`
 - `module`: `End-to-End MVP Workflow`
 - `case_type`: `core`
+- `tags`: `[core, multi_level_official_sources, target_cycle_unpublished, previous_cycle]`
+- `website_characteristic`: Observed during evaluation: Requirements relied on exact-programme and broader official evidence; Timeline for the target Fall 2027 cycle returned `not_found`, while some reviewed requirement or administrative facts belonged to a previous cycle.
+- `retrieval_risk`: Department/university facts may not have exact programme applicability, and previous-cycle facts or absent dates can be incorrectly promoted to the requested cycle.
+- `why_representative`: Exercises multi-level official-source attribution and the requirement to preserve `not_found` rather than fabricate target-cycle dates.
+- `classification_evidence`: `docs/evals/mvp_eval_report.md#CORE-004--MANUAL-REVIEW`; `docs/evals/mvp_manual_review_results.md#CORE-004--Imperial-Applied-Machine-Learning-MSc`.
 - `user_fixture`: `UF-CORE-001`
 - `user_answer_script`: 使用 `UF-CORE-001.user_answer_script`，不得临时补充或改写用户背景。
 - `input / scenario`: 用户选择 Imperial College London 的 Applied Machine Learning MSc，并为未来入学周期生成完整申请计划。
@@ -149,6 +181,11 @@ Manual Review 不是要求模型逐字、逐项复刻官网全部内容，也不
 - `case_id`: `CORE-005`
 - `module`: `End-to-End MVP Workflow`
 - `case_type`: `core`
+- `tags`: `[core, dense_programme_page, programme_specific_materials, undated_requirements, stage_classification]`
+- `website_characteristic`: Observed during project testing: one accessible programme-level entry page contains academic thresholds, application documents, selection criteria, undated requirements, and post-enrolment track/course eligibility notes, with some details delegated to linked instructions.
+- `retrieval_risk`: Long dense content can omit an independent required material such as the summary sheet, lose numerical/submission details, or misclassify an in-program track condition as pre-admission.
+- `why_representative`: Provides a readable exact-page case that still stresses dense section coverage, programme-versus-general document scope, undated-cycle handling, and admission-stage classification.
+- `classification_evidence`: `docs/evals/mvp_manual_review_results.md#CORE-005--KTH-MSc-Computer-Science`; `backend/scripts/test_requirements_web_search.py`; `docs/evals/kth_two_stage_final_review.md`.
 - `user_fixture`: `UF-CORE-001`
 - `user_answer_script`: 使用 `UF-CORE-001.user_answer_script`，不得临时补充或改写用户背景。
 - `input / scenario`: 用户选择 KTH Royal Institute of Technology 的 MSc Computer Science，Profile 可包含简写形式的院校与专业信息，并确认目标申请周期。
